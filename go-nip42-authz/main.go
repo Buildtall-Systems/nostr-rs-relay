@@ -18,8 +18,7 @@ type server struct {
 
 func newServer() *server {
 	allowedPubkeys := []string{
-		"your_pubkey_hex_1_here",
-		"your_pubkey_hex_2_here",
+		"dd81a8bacbab0b5c3007d1672fb8301383b4e9583d431835985057223eb298a5",
 	}
 
 	allowedMap := make(map[string]bool)

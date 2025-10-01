@@ -2,7 +2,7 @@
 
 [info]
 # The advertised URL for the Nostr websocket.
-relay_url = "wss://nostr.example.com/"
+relay_url = "ws://localhost:7777/"
 
 # Relay information for clients.  Put your unique server name here.
 name = "nostr-rs-relay"
@@ -76,19 +76,19 @@ description = "A newly created nostr-rs-relay.\n\nCustomize this with your own i
 # the URL below.  In the event the server is not accessible, events
 # will be permitted.  The protobuf3 schema used is available in
 # `proto/nauthz.proto`.
-# event_admission_server = "http://[::1]:50051"
+event_admission_server = "http://[::1]:50051"
 
 # If the event admission server denies writes
 # in any case (excluding spam filtering).
 # This is reflected in the relay information document.
-# restricts_write = true
+restricts_write = true
 
 [network]
 # Bind to this network address
 address = "0.0.0.0"
 
 # Listen on this port
-port = 8080
+port = 7777
 
 # If present, read this HTTP header for logging client IP addresses.
 # Examples for common proxies, cloudflare:
@@ -172,7 +172,7 @@ limit_scrapers = false
 #  "887645fef0ce0c3c1218d2f5d8e6132a19304cdc57cd20281d082f38cfea0072",
 #]
 # Enable NIP-42 authentication
-#nip42_auth = false
+nip42_auth = true
 # Send DMs (kind 4 and 44) and gift wraps (kind 1059) only to their authenticated recipients
 #nip42_dms = false
 

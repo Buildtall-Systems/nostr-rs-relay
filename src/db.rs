@@ -366,12 +366,19 @@ pub async fn db_writer(
                             grpc_start.elapsed(),
                             subm_event.source_ip
                         );
-                        notice_tx
-                            .try_send(Notice::blocked(
-                                event.id,
-                                &decision.message().unwrap_or_default(),
-                            ))
-                            .ok();
+                        let msg = decision.message().unwrap_or_default();
+                        if msg.starts_with("auth-required:") {
+                            notice_tx
+                                .try_send(Notice::auth_required(event.id, &msg))
+                                .ok();
+                        } else {
+                            notice_tx
+                                .try_send(Notice::blocked(
+                                    event.id,
+                                    &msg,
+                                ))
+                                .ok();
+                        }
                         continue;
                     }
                 }

@@ -1,0 +1,16 @@
+[Unit]
+Description=relay.drss.io
+After=network.target nip42-authz.service
+Requires=nip42-authz.service
+
+[Service]
+User=relay
+WorkingDirectory=/var/lib/relay.drss.io
+Environment=RUST_LOG=warn,nostr_rs_relay=warn
+ExecStart=/usr/local/bin/nostr-rs-relay --config /var/lib/relay.drss.io/config.toml
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

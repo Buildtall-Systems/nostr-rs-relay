@@ -1,0 +1,14 @@
+# NIP-42 Authorization Server Configuration
+
+# Logging configuration
+# Valid levels: DEBUG, INFO, WARN, ERROR
+log_level = "ERROR"
+
+# Server listen address
+# Default: "[::1]:50051" (IPv6 localhost)
+listen_address = "[::1]:50051"
+
+# List of allowed npubs (Nostr public keys in bech32 format)
+allowed_npubs = [
+    "npub1mkq63wkt4v94cvq869njlwpszwpmf62c84p3sdvc2ptjy04jnzjs20r4tx",
+]

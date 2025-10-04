@@ -1,0 +1,14 @@
+[Unit]
+Description=NIP-42 Authorization gRPC Server
+After=network.target
+
+[Service]
+User=relay
+WorkingDirectory=/var/lib/relay.drss.io
+ExecStart=/usr/local/bin/nip42-authz
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

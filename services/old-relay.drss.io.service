@@ -1,0 +1,16 @@
+cat relay.drss.io.service
+[Unit]
+Description=relay.drss.io
+
+[Service]
+User=relay
+WorkingDirectory=/var/lib/relay.drss.io
+#WorkingDirectory=/usr/local/bin
+Environment=RUST_LOG=warn,nostr_rs_relay=warn
+ExecStart=/usr/local/bin/nostr-rs-relay --config /etc/relay.drss.io/config.toml
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

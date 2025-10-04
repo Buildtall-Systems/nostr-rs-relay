@@ -51,7 +51,7 @@ func (s *server) EventAdmit(ctx context.Context, req *pb.EventRequest) (*pb.Even
 	}
 
 	eventPubkeyHex := hex.EncodeToString(req.Event.Pubkey)
-	log.Printf("PERMIT: Authenticated pubkey %s publishing event from author %s (kind=%d)\n",
+	log.Printf("PERMIT: Authenticated as %s, publishing event authored by %s (kind=%d)\n",
 		authPubkeyHex, eventPubkeyHex, req.Event.Kind)
 
 	return &pb.EventReply{

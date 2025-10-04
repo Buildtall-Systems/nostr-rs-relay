@@ -167,9 +167,9 @@ limit_scrapers = false
 # Pubkey addresses in this array are whitelisted for event publishing.
 # Only valid events by these authors will be accepted, if the variable
 # is set.
-pubkey_whitelist = [
-  "dd81a8bacbab0b5c3007d1672fb8301383b4e9583d431835985057223eb298a5",
-]
+#pubkey_whitelist = [
+#  "dd81a8bacbab0b5c3007d1672fb8301383b4e9583d431835985057223eb298a5",
+#]
 # Enable NIP-42 authentication
 nip42_auth = true
 # Send DMs (kind 4 and 44) and gift wraps (kind 1059) only to their authenticated recipients

@@ -24,12 +24,14 @@ let
     ))
   ));
 
-  # Generate authz policy-config.toml
-  authzConfig = pkgs.writeText "policy-config.toml" (lib.generators.toTOML {} {
-    log_level = cfg.authz.logLevel;
-    listen_address = cfg.authz.listenAddress;
-    allowed_npubs = cfg.authz.allowedNpubs;
-  });
+  # Generate authz policy-config.toml (manual TOML since lib.generators.toTOML may not exist)
+  authzConfig = pkgs.writeText "policy-config.toml" ''
+    log_level = "${cfg.authz.logLevel}"
+    listen_address = "${cfg.authz.listenAddress}"
+    allowed_npubs = [
+    ${lib.concatMapStringsSep "\n" (npub: ''    "${npub}",'') cfg.authz.allowedNpubs}
+    ]
+  '';
 
 in
 {

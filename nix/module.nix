@@ -8,21 +8,52 @@ let
   relayPkg = self.packages.${pkgs.system}.nostr-rs-relay;
   authzPkg = self.packages.${pkgs.system}.nip42-authz;
 
-  # Generate relay config.toml
-  relayConfig = pkgs.writeText "config.toml" (lib.generators.toTOML {} (
-    lib.recursiveUpdate {
-      # Defaults that can be overridden
-      database.data_directory = cfg.dataDir;
-    } (lib.recursiveUpdate cfg.settings (
-      # If authz is enabled, configure gRPC connection
-      lib.optionalAttrs cfg.authz.enable {
-        grpc = {
-          event_admission_server = "http://${cfg.authz.listenAddress}";
-          restricts_write = true;
-        };
-      }
-    ))
+  # Helper to convert Nix attrset to TOML (lib.generators.toTOML doesn't exist)
+  toTOML = attrs:
+    let
+      # Convert a value to TOML format
+      valueToTOML = v:
+        if builtins.isString v then ''"${v}"''
+        else if builtins.isBool v then (if v then "true" else "false")
+        else if builtins.isInt v then toString v
+        else if builtins.isList v then "[${lib.concatMapStringsSep ", " valueToTOML v}]"
+        else toString v;
+
+      # Generate TOML for a section
+      sectionToTOML = name: value:
+        if builtins.isAttrs value then
+          "[${name}]\n" + (lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v:
+            if builtins.isAttrs v then ""  # Skip nested attrs (handled separately)
+            else "${k} = ${valueToTOML v}"
+          ) value))
+        else "${name} = ${valueToTOML value}";
+
+      # Collect all sections (top-level attrs that are attrsets)
+      sections = lib.filterAttrs (n: v: builtins.isAttrs v) attrs;
+      # Collect top-level scalars
+      scalars = lib.filterAttrs (n: v: !builtins.isAttrs v) attrs;
+
+      scalarLines = lib.mapAttrsToList (k: v: "${k} = ${valueToTOML v}") scalars;
+      sectionLines = lib.mapAttrsToList sectionToTOML sections;
+    in
+      lib.concatStringsSep "\n\n" (scalarLines ++ sectionLines);
+
+  # Build merged config
+  mergedConfig = lib.recursiveUpdate {
+    # Defaults that can be overridden
+    database.data_directory = cfg.dataDir;
+  } (lib.recursiveUpdate cfg.settings (
+    # If authz is enabled, configure gRPC connection
+    lib.optionalAttrs cfg.authz.enable {
+      grpc = {
+        event_admission_server = "http://${cfg.authz.listenAddress}";
+        restricts_write = true;
+      };
+    }
   ));
+
+  # Generate relay config.toml
+  relayConfig = pkgs.writeText "config.toml" (toTOML mergedConfig);
 
   # Generate authz policy-config.toml (manual TOML since lib.generators.toTOML may not exist)
   authzConfig = pkgs.writeText "policy-config.toml" ''

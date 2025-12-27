@@ -2,7 +2,7 @@
 
 # Logging configuration
 # Valid levels: DEBUG, INFO, WARN, ERROR
-log_level = "ERROR"
+log_level = "DEBUG"
 
 # Server listen address
 # Default: "[::1]:50051" (IPv6 localhost)
@@ -11,4 +11,10 @@ listen_address = "[::1]:50051"
 # List of allowed npubs (Nostr public keys in bech32 format)
 allowed_npubs = [
     "npub1mkq63wkt4v94cvq869njlwpszwpmf62c84p3sdvc2ptjy04jnzjs20r4tx",
+    "npub1cvdk88lgnc8d3mjr0gd8tws4dvfjt0e00cchg4433kagrj8y88pqra5lmy",
+    "npub1yg7nfn2u77vzvfxvvkclx2yav7pnpgmzjw7jjefxj9mlqknfa49s8jqle2",
+    "npub15206qajn8lh86fn4zzvdrw32ln0v2c63za3hpvdsfh7ve0cf5r0se57vtx",
+    "npub1vh5xmc34l5exww4f0g2u2q76fmeasqz75flqk7nj2j2kzvwvd0xqfupqvl",
+    "npub1u90nwtmkxa74pmkrycjw2pup702tyhs670fhnz0kqgxcruzhay2sswqew6",
+    "npub1nu8gll8rwp2vp02e2a5046shcxmqydp95gga2lsjuqk38m5w9zfq7jdwmt",
 ]

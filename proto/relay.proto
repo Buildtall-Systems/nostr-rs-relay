@@ -1,0 +1,92 @@
+syntax = "proto3";
+package nostr.relay.v1;
+
+service Relay {
+  // Publish a signed event
+  rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // Subscribe to events matching a filter (server-streaming)
+  rpc Subscribe(SubscribeRequest) returns (stream EventEnvelope);
+
+  // Close a subscription
+  rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
+
+  // NIP-42 challenge-response auth
+  rpc Auth(AuthRequest) returns (AuthResponse);
+
+  // Query events (one-shot, no subscription)
+  rpc Query(QueryRequest) returns (QueryResponse);
+}
+
+message Event {
+  bytes id = 1;           // 32-byte event ID
+  bytes pubkey = 2;       // 32-byte public key
+  int64 created_at = 3;   // Unix timestamp
+  int32 kind = 4;         // Event kind
+  repeated Tag tags = 5;
+  bytes content = 6;      // Raw content bytes
+  bytes sig = 7;          // 64-byte Schnorr signature
+}
+
+message Tag {
+  repeated string values = 1;  // ["p", "<hex>", "relay-url"]
+}
+
+message Filter {
+  repeated bytes ids = 1;
+  repeated bytes authors = 2;
+  repeated int32 kinds = 3;
+  map<string, StringList> tags = 4;  // #e, #p, #d, etc.
+  int64 since = 5;
+  int64 until = 6;
+  int32 limit = 7;
+}
+
+message StringList {
+  repeated string values = 1;
+}
+
+message PublishRequest {
+  Event event = 1;
+}
+
+message PublishResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message SubscribeRequest {
+  string subscription_id = 1;
+  repeated Filter filters = 2;
+}
+
+message EventEnvelope {
+  string subscription_id = 1;
+  oneof payload {
+    Event event = 2;
+    bool eose = 3;  // End of stored events
+  }
+}
+
+message UnsubscribeRequest {
+  string subscription_id = 1;
+}
+
+message UnsubscribeResponse {}
+
+message QueryRequest {
+  repeated Filter filters = 1;
+}
+
+message QueryResponse {
+  repeated Event events = 1;
+}
+
+message AuthRequest {
+  Event auth_event = 1;  // kind 22242
+}
+
+message AuthResponse {
+  bool authenticated = 1;
+  string message = 2;
+}

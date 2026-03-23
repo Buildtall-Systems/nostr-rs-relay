@@ -1001,6 +1001,7 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
                 bcast_tx.clone(),
                 repo.clone(),
                 settings.clone(),
+                metrics.clone(),
             );
             let grpc_shutdown_rx = invoke_shutdown.subscribe();
             tokio::spawn(async move {

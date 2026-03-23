@@ -9,13 +9,9 @@
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.flake-utils.follows = "flake-utils";
     };
 
-    crane = {
-      url = "github:ipetkov/crane";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    crane.url = "github:ipetkov/crane";
 
     buildtall.url = "git+ssh://git@github.com/Buildtall-Systems/buildtall.git";
   };
@@ -29,17 +25,11 @@
           inherit system overlays;
         };
 
-        # Use Rust 1.81 or later (required by home@0.5.11)
-        # Using stable.latest should give us at least 1.81
-        rustToolchain = pkgs.rust-bin.stable.latest.minimal;
+        # Use Rust stable latest (1.81+ required by home@0.5.11)
+        rustToolchain = pkgs.rust-bin.stable.latest.default;
 
-        # Override pkgs to use the newer Rust toolchain
-        pkgsWithRust = pkgs.extend (final: prev: {
-          rustc = rustToolchain;
-          cargo = rustToolchain;
-        });
-
-        craneLib = inputs.crane.mkLib pkgsWithRust;
+        # Override crane's toolchain via overrideToolchain (current API)
+        craneLib = (inputs.crane.mkLib pkgs).overrideToolchain (p: rustToolchain);
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:

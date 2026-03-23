@@ -24,7 +24,7 @@ message Event {
   int64 created_at = 3;   // Unix timestamp
   int32 kind = 4;         // Event kind
   repeated Tag tags = 5;
-  bytes content = 6;      // Raw content bytes
+  string content = 6;     // NIP-01: "arbitrary string"
   bytes sig = 7;          // 64-byte Schnorr signature
 }
 

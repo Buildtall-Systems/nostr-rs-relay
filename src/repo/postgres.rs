@@ -1,23 +1,24 @@
 use crate::db::QueryResult;
+use crate::error;
 use crate::error::Result;
 use crate::event::{single_char_tagname, Event};
 use crate::nip05::{Nip05Name, VerificationRecord};
 use crate::payment::{InvoiceInfo, InvoiceStatus};
+use crate::repo::postgres_migration::run_migrations;
 use crate::repo::{now_jitter, NostrRepo};
-use crate::subscription::{ReqFilter, Subscription};
+use crate::server::NostrMetrics;
+use crate::subscription::{ReqFilter, Subscription, TagOperand};
+use crate::utils::{self, is_hex, is_lower_hex};
 use async_std::stream::StreamExt;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
+use itertools::Itertools;
+use nostr::key::Keys;
 use sqlx::postgres::PgRow;
 use sqlx::Error::RowNotFound;
 use sqlx::{Error, Execute, FromRow, Postgres, QueryBuilder, Row};
+use std::ops::Deref;
 use std::time::{Duration, Instant};
-
-use crate::error;
-use crate::repo::postgres_migration::run_migrations;
-use crate::server::NostrMetrics;
-use crate::utils::{self, is_hex, is_lower_hex};
-use nostr::key::Keys;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot::Receiver;
 use tracing::{debug, error, info, trace, warn};
@@ -712,16 +713,87 @@ LIMIT 1;
 }
 
 /// Create a dynamic SQL query and params from a subscription filter.
-fn query_from_filter(f: &ReqFilter) -> Option<QueryBuilder<Postgres>> {
+fn query_from_filter(f: &'_ ReqFilter) -> Option<QueryBuilder<'_, Postgres>> {
     // if the filter is malformed, don't return anything.
     if f.force_no_match {
         return None;
     }
 
-    let mut query = QueryBuilder::new("SELECT e.\"content\", e.created_at FROM \"event\" e WHERE ");
+    let mut query = QueryBuilder::new("SELECT e.\"content\", e.created_at FROM \"event\" e");
 
     // This tracks whether we need to push a prefix AND before adding another clause
     let mut push_and = false;
+
+    // Query for tags
+    if let Some(map) = &f.tags {
+        if !map.is_empty() {
+            let mut tag_ctr = 1;
+            for (key, val) in map.iter().sorted_by(|(k1, _), (k2, _)| k1.cmp(k2)) {
+                if val.is_empty() {
+                    return None;
+                }
+                let has_plain_values = val.deref().into_iter().any(|v| !is_lower_hex(&v));
+                let has_hex_values = val.deref().into_iter().any(|v| is_lower_hex(&v));
+
+                if let TagOperand::Or(v_or) = val {
+                    query
+                        .push(format!(
+                            " JOIN tag t{0} on e.id = t{0}.event_id AND t{0}.\"name\" = ",
+                            tag_ctr
+                        ))
+                        .push_bind(key.to_string())
+                        .push(" AND (");
+
+                    if has_plain_values {
+                        query.push(format!("t{0}.\"value\" in (", tag_ctr));
+                        let mut tag_query = query.separated(", ");
+                        for v in v_or.iter().filter(|v| !is_lower_hex(v)) {
+                            tag_query.push_bind(v.as_bytes());
+                        }
+                    }
+                    if has_plain_values && has_hex_values {
+                        query.push(") OR ");
+                    }
+                    if has_hex_values {
+                        query.push(format!("t{0}.\"value_hex\" in (", tag_ctr));
+                        let mut tag_query = query.separated(", ");
+                        for v in v_or.iter().filter(|v| v.len() % 2 == 0 && is_lower_hex(v)) {
+                            tag_query.push_bind(hex::decode(v).ok());
+                        }
+                    }
+
+                    tag_ctr += 1;
+                    query.push("))");
+                } else if let TagOperand::And(v_and) = val {
+                    let mut sorted_values: Vec<_> = v_and.iter().collect();
+                    sorted_values.sort();
+                    for vx in sorted_values {
+                        query
+                            .push(format!(
+                                " JOIN \"tag\" t{0} on e.id = t{0}.event_id AND t{0}.\"name\" = ",
+                                tag_ctr
+                            ))
+                            .push_bind(key.to_string())
+                            .push(" AND ");
+
+                        if !is_lower_hex(vx) {
+                            query
+                                .push(format!("t{0}.\"value\" = ", tag_ctr))
+                                .push_bind(vx.as_bytes());
+                        } else {
+                            query
+                                .push(format!("t{0}.\"value_hex\" = ", tag_ctr))
+                                .push_bind(hex::decode(vx).ok());
+                        }
+
+                        tag_ctr += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    query.push(" WHERE ");
     // Query for "authors", allowing prefix matches
     if let Some(auth_vec) = &f.authors {
         // filter out non-hex values
@@ -783,57 +855,6 @@ fn query_from_filter(f: &ReqFilter) -> Option<QueryBuilder<Postgres>> {
             sep.push_bind(hex::decode(id).ok());
         }
         query.push("))");
-    }
-
-    // Query for tags
-    if let Some(map) = &f.tags {
-        if !map.is_empty() {
-            if push_and {
-                query.push(" AND ");
-            }
-            push_and = true;
-
-            let mut push_or = false;
-            query.push("e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and ");
-            for (key, val) in map.iter() {
-                if val.is_empty() {
-                    return None;
-                }
-                if push_or {
-                    query.push(" OR ");
-                }
-                query
-                    .push("(t.\"name\" = ")
-                    .push_bind(key.to_string())
-                    .push(" AND (");
-
-                let has_plain_values = val.iter().any(|v| (v.len() % 2 != 0 || !is_lower_hex(v)));
-                let has_hex_values = val.iter().any(|v| v.len() % 2 == 0 && is_lower_hex(v));
-                if has_plain_values {
-                    query.push("value in (");
-                    // plain value match first
-                    let mut tag_query = query.separated(", ");
-                    for v in val.iter().filter(|v| v.len() % 2 != 0 || !is_lower_hex(v)) {
-                        tag_query.push_bind(v.as_bytes());
-                    }
-                }
-                if has_plain_values && has_hex_values {
-                    query.push(") OR ");
-                }
-                if has_hex_values {
-                    query.push("value_hex in (");
-                    // plain value match first
-                    let mut tag_query = query.separated(", ");
-                    for v in val.iter().filter(|v| v.len() % 2 == 0 && is_lower_hex(v)) {
-                        tag_query.push_bind(hex::decode(v).ok());
-                    }
-                }
-
-                query.push(")))");
-                push_or = true;
-            }
-            query.push(")");
-        }
     }
 
     // Query for timestamp
@@ -904,6 +925,7 @@ impl FromRow<'_, PgRow> for VerificationRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subscription::TagOperand;
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -919,15 +941,15 @@ mod tests {
             limit: None,
             tags: Some(HashMap::from([(
                 'p',
-                HashSet::from([
+                TagOperand::Or(HashSet::from([
                     "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
-                ]),
+                ])),
             )])),
             force_no_match: false,
         };
 
         let q = query_from_filter(&filter).unwrap();
-        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE (e.pub_key in ($1) OR e.delegated_by in ($2)) AND e.kind in ($3) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $4 AND (value_hex in ($5)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e JOIN tag t1 on e.id = t1.event_id AND t1.\"name\" = $1 AND (t1.\"value_hex\" in ($2)) WHERE (e.pub_key in ($3) OR e.delegated_by in ($4)) AND e.kind in ($5) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
     }
 
     #[test]
@@ -941,12 +963,15 @@ mod tests {
                 "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
             ]),
             limit: None,
-            tags: Some(HashMap::from([('d', HashSet::from(["test".to_owned()]))])),
+            tags: Some(HashMap::from([(
+                'd',
+                TagOperand::Or(HashSet::from(["test".to_owned()])),
+            )])),
             force_no_match: false,
         };
 
         let q = query_from_filter(&filter).unwrap();
-        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE (e.pub_key in ($1) OR e.delegated_by in ($2)) AND e.kind in ($3) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $4 AND (value in ($5)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e JOIN tag t1 on e.id = t1.event_id AND t1.\"name\" = $1 AND (t1.\"value\" in ($2)) WHERE (e.pub_key in ($3) OR e.delegated_by in ($4)) AND e.kind in ($5) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
     }
 
     #[test]
@@ -962,16 +987,16 @@ mod tests {
             limit: None,
             tags: Some(HashMap::from([(
                 'd',
-                HashSet::from([
+                TagOperand::And(HashSet::from([
                     "test".to_owned(),
                     "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
-                ]),
+                ])),
             )])),
             force_no_match: false,
         };
 
         let q = query_from_filter(&filter).unwrap();
-        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE (e.pub_key in ($1) OR e.delegated_by in ($2)) AND e.kind in ($3) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $4 AND (value in ($5) OR value_hex in ($6)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e JOIN \"tag\" t1 on e.id = t1.event_id AND t1.\"name\" = $1 AND t1.\"value_hex\" = $2 JOIN \"tag\" t2 on e.id = t2.event_id AND t2.\"name\" = $3 AND t2.\"value\" = $4 WHERE (e.pub_key in ($5) OR e.delegated_by in ($6)) AND e.kind in ($7) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
     }
 
     #[test]
@@ -983,14 +1008,42 @@ mod tests {
             until: None,
             authors: None,
             limit: None,
-            tags: Some(HashMap::from([
-                ('d', HashSet::from(["follow".to_owned()])),
-                ('t', HashSet::from(["siamstr".to_owned()])),
-            ])),
+            tags: Some(HashMap::from([(
+                'd',
+                TagOperand::Or(HashSet::from([
+                    "test".to_owned(),
+                    "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
+                ])),
+            )])),
+            force_no_match: false,
+        };
+
+        let q = query_from_filter(&filter).unwrap();
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e JOIN tag t1 on e.id = t1.event_id AND t1.\"name\" = $1 AND (t1.\"value\" in ($2) OR t1.\"value_hex\" in ($3)) WHERE e.kind in ($4) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+    }
+
+    #[test]
+    fn test_query_gen_tag_value_hex_and() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![1000]),
+            since: None,
+            until: None,
+            authors: Some(vec![
+                "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
+            ]),
+            limit: None,
+            tags: Some(HashMap::from([(
+                'p',
+                TagOperand::And(HashSet::from([
+                    "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
+                    "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
+                ])),
+            )])),
             force_no_match: false,
         };
         let q = query_from_filter(&filter).unwrap();
-        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e WHERE e.kind in ($1) AND e.id IN (SELECT ee.id FROM \"event\" ee LEFT JOIN tag t on ee.id = t.event_id WHERE ee.hidden != 1::bit(1) and (t.\"name\" = $2 AND (value in ($3))) OR (t.\"name\" = $4 AND (value in ($5)))) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
+        assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e JOIN \"tag\" t1 on e.id = t1.event_id AND t1.\"name\" = $1 AND t1.\"value_hex\" = $2 JOIN \"tag\" t2 on e.id = t2.event_id AND t2.\"name\" = $3 AND t2.\"value_hex\" = $4 WHERE (e.pub_key in ($5) OR e.delegated_by in ($6)) AND e.kind in ($7) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
     }
 
     #[test]
@@ -1002,7 +1055,7 @@ mod tests {
             until: None,
             authors: None,
             limit: None,
-            tags: Some(HashMap::from([('a', HashSet::new())])),
+            tags: Some(HashMap::from([('a', TagOperand::And(HashSet::new()))])),
             force_no_match: false,
         };
         assert!(query_from_filter(&filter).is_none());

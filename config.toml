@@ -83,6 +83,12 @@ event_admission_server = "http://[::1]:50051"
 # This is reflected in the relay information document.
 restricts_write = true
 
+# Optional gRPC relay server address.  When set, a tonic gRPC server
+# starts alongside the WebSocket listener, exposing the Relay service
+# defined in proto/relay.proto (Publish, Subscribe, Query, Auth RPCs).
+# Disabled by default.
+#relay_server_address = "[::1]:50053"
+
 [network]
 # Bind to this network address
 address = "0.0.0.0"

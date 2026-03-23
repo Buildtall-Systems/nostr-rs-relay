@@ -1,4 +1,4 @@
-{ self }:
+{ self, buildtall }:
 { config, lib, pkgs, ... }:
 
 let
@@ -6,7 +6,7 @@ let
 
   # Get packages for the current system
   relayPkg = self.packages.${pkgs.system}.nostr-rs-relay;
-  authzPkg = self.packages.${pkgs.system}.nip42-authz;
+  authzPkg = buildtall.packages.${pkgs.system}.relay-authz;
 
   # Helper to convert Nix attrset to TOML (lib.generators.toTOML doesn't exist)
   toTOML = attrs:
@@ -38,7 +38,7 @@ let
     in
       lib.concatStringsSep "\n\n" (scalarLines ++ sectionLines);
 
-  # Build merged config
+  # Build merged relay config
   mergedConfig = lib.recursiveUpdate {
     # Defaults that can be overridden
     database.data_directory = cfg.dataDir;
@@ -46,7 +46,7 @@ let
     # If authz is enabled, configure gRPC connection
     lib.optionalAttrs cfg.authz.enable {
       grpc = {
-        event_admission_server = "http://${cfg.authz.listenAddress}";
+        event_admission_server = "http://${cfg.authz.grpcAddress}";
         restricts_write = true;
       };
     }
@@ -55,14 +55,19 @@ let
   # Generate relay config.toml
   relayConfig = pkgs.writeText "config.toml" (toTOML mergedConfig);
 
-  # Generate authz policy-config.toml (manual TOML since lib.generators.toTOML may not exist)
-  authzConfig = pkgs.writeText "policy-config.toml" ''
-    log_level = "${cfg.authz.logLevel}"
-    listen_address = "${cfg.authz.listenAddress}"
-    allowed_npubs = [
-    ${lib.concatMapStringsSep "\n" (npub: ''    "${npub}",'') cfg.authz.allowedNpubs}
-    ]
-  '';
+  # Generate relay-authz config.yaml
+  authzConfig = pkgs.writeText "relay-authz.yaml" (lib.generators.toYAML {} {
+    log_level = cfg.authz.logLevel;
+    database_dir = cfg.dataDir;
+    grpc.listen_address = cfg.authz.grpcAddress;
+    http.listen_address = cfg.authz.httpAddress;
+    http.public_base_url = cfg.authz.publicBaseUrl;
+  });
+
+  # Generate seed-admins.yaml
+  seedConfig = pkgs.writeText "seed-admins.yaml" (lib.generators.toYAML {} {
+    admin_npubs = cfg.authz.adminNpubs;
+  });
 
 in
 {
@@ -120,31 +125,43 @@ in
     };
 
     authz = {
-      enable = lib.mkEnableOption "NIP-42 authorization sidecar";
+      enable = lib.mkEnableOption "relay-authz authorization sidecar";
 
       package = lib.mkOption {
         type = lib.types.package;
         default = authzPkg;
-        defaultText = lib.literalExpression "self.packages.\${pkgs.system}.nip42-authz";
-        description = "The nip42-authz package to use";
+        defaultText = lib.literalExpression "buildtall.packages.\${pkgs.system}.relay-authz";
+        description = "The relay-authz package to use";
       };
 
-      listenAddress = lib.mkOption {
+      grpcAddress = lib.mkOption {
         type = lib.types.str;
         default = "[::1]:50051";
         description = "gRPC listen address for authz service";
       };
 
+      httpAddress = lib.mkOption {
+        type = lib.types.str;
+        default = "127.0.0.1:8090";
+        description = "HTTP listen address for authz admin dashboard";
+      };
+
+      publicBaseUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "https://auth.nostr.io";
+        description = "Public base URL for the authz HTTP service";
+      };
+
       logLevel = lib.mkOption {
         type = lib.types.enum [ "DEBUG" "INFO" "WARN" "ERROR" ];
-        default = "ERROR";
+        default = "INFO";
         description = "Log level for the authz service";
       };
 
-      allowedNpubs = lib.mkOption {
+      adminNpubs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];
-        description = "List of npubs allowed to publish";
+        description = "List of admin npubs to seed on startup";
         example = [ "npub1mkq63wkt4v94cvq869njlwpszwpmf62c84p3sdvc2ptjy04jnzjs20r4tx" ];
       };
     };
@@ -163,8 +180,8 @@ in
     users.groups.${cfg.group} = {};
 
     # Authz sidecar service (if enabled)
-    systemd.services.nip42-authz = lib.mkIf cfg.authz.enable {
-      description = "NIP-42 Authorization Service";
+    systemd.services.relay-authz = lib.mkIf cfg.authz.enable {
+      description = "Relay Authorization Service";
       wantedBy = [ "multi-user.target" ];
       before = [ "nostr-relay.service" ];
 
@@ -173,7 +190,7 @@ in
         User = cfg.user;
         Group = cfg.group;
         WorkingDirectory = cfg.dataDir;
-        ExecStart = "${cfg.authz.package}/bin/nip42-authz";
+        ExecStart = "${cfg.authz.package}/bin/relay-authz --config ${authzConfig} --seed ${seedConfig}";
         Restart = "always";
         RestartSec = 5;
 
@@ -184,12 +201,6 @@ in
         PrivateTmp = true;
         ReadWritePaths = [ cfg.dataDir ];
       };
-
-      # Copy config to working directory before starting
-      preStart = ''
-        cp ${authzConfig} ${cfg.dataDir}/policy-config.toml
-        chmod 600 ${cfg.dataDir}/policy-config.toml
-      '';
     };
 
     # Main relay service
@@ -197,8 +208,8 @@ in
       description = "Nostr Relay (nostr-rs-relay)";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ]
-        ++ lib.optional cfg.authz.enable "nip42-authz.service";
-      requires = lib.optional cfg.authz.enable "nip42-authz.service";
+        ++ lib.optional cfg.authz.enable "relay-authz.service";
+      requires = lib.optional cfg.authz.enable "relay-authz.service";
 
       serviceConfig = {
         Type = "simple";

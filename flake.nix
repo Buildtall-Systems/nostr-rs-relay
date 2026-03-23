@@ -6,18 +6,30 @@
 
     flake-utils.url = "github:numtide/flake-utils";
 
-    crane = {
-      url = "github:ipetkov/crane";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    crane.url = "github:ipetkov/crane";
+
+    buildtall.url = "git+ssh://git@github.com/Buildtall-Systems/buildtall.git";
   };
 
   outputs = inputs@{ self, ... }:
     (inputs.flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = inputs.nixpkgs.legacyPackages.${system};
-        lib = pkgs.lib;
-        craneLib = inputs.crane.mkLib pkgs;
+        # Import nixpkgs with rust-overlay
+        overlays = [ (import inputs.rust-overlay) ];
+        pkgs = import inputs.nixpkgs {
+          inherit system overlays;
+        };
+
+        # Use Rust stable latest (1.81+ required by home@0.5.11)
+        rustToolchain = pkgs.rust-bin.stable.latest.default;
+
+        # Override crane's toolchain via overrideToolchain (current API)
+        craneLib = (inputs.crane.mkLib pkgs).overrideToolchain (p: rustToolchain);
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
@@ -29,30 +41,10 @@
         crate = craneLib.buildPackage {
           name = "nostr-rs-relay";
           inherit src;
-          nativeBuildInputs = [ pkgs.pkg-config pkgs.protobuf ];
-        };
-
-        nip42-authz = pkgs.buildGoModule {
-          pname = "nip42-authz";
-          version = "0.1.0";
-          src = ./go-nip42-authz;
-
-          # Use vendored dependencies (no hash needed)
-          vendorHash = null;
-
-          # Proto files are pre-generated, no preBuild needed
-
-          ldflags = [ "-s" "-w" ];
-
-          # Rename the binary from rs-relay-auth-server to nip42-authz
-          postInstall = ''
-            mv $out/bin/rs-relay-auth-server $out/bin/nip42-authz
-          '';
-
-          meta = {
-            description = "NIP-42 Authorization gRPC service for nostr-rs-relay";
-            license = lib.licenses.mit;
-          };
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.protobuf
+          ];
         };
       in
       {
@@ -62,15 +54,21 @@
         packages = {
           default = crate;
           nostr-rs-relay = crate;
-          inherit nip42-authz;
         };
         formatter = pkgs.nixpkgs-fmt;
-        devShells.default = craneLib.devShell {
-          checks = self.checks.${system};
+        devShells.default = pkgs.mkShell {
+          buildInputs = [
+            rustToolchain
+            pkgs.pkg-config
+            pkgs.protobuf
+          ];
         };
       })) // {
       # System-independent outputs
-      nixosModules.default = import ./nix/module.nix { inherit self; };
+      nixosModules.default = import ./nix/module.nix {
+        inherit self;
+        buildtall = inputs.buildtall;
+      };
       nixosModules.nostr-relay = self.nixosModules.default;
     };
 }

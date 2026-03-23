@@ -1,37 +1,10 @@
-.PHONY: proto build-go build-rust build build-for-deploy run-auth run-relay run clean vendor
+.PHONY: build run clean
 
-proto:
-	nix-shell -p protobuf go protoc-gen-go protoc-gen-go-grpc --run "protoc --go_out=go-nip42-authz --go_opt=paths=source_relative --go_opt=Mproto/nauthz.proto=. --go-grpc_out=go-nip42-authz --go-grpc_opt=paths=source_relative --go-grpc_opt=Mproto/nauthz.proto=. proto/nauthz.proto"
-
-build-go: proto
-	cd go-nip42-authz && go build -o nip42-authz main.go
-
-build-rust:
+build:
 	nix-shell -p protobuf --run "cargo build --release"
 
-build: build-go build-rust
-
-build-for-deploy:
-	cd go-nip42-authz && CGO_ENABLED=0 go build -o nip42-authz main.go
-	nix-shell -p protobuf cargo rustc --run "cargo build --release"
-	nix-shell -p patchelf --run "patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 ./target/release/nostr-rs-relay"
-
-run-auth: build-go
-	./go-nip42-authz/nip42-authz
-
-run-relay: build-rust
-	./target/release/nostr-rs-relay
-
-run:
-	@echo "Starting auth server and relay..."
-	@trap 'kill 0' EXIT; \
-	./go-nip42-authz/nip42-authz & \
+run: build
 	./target/release/nostr-rs-relay
 
 clean:
-	rm -f go-nip42-authz/*.pb.go
-	rm -f go-nip42-authz/nip42-authz
 	cargo clean
-
-vendor:
-	cd go-nip42-authz && go mod vendor

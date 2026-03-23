@@ -994,6 +994,30 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
                 }))
             }
         });
+        if let Some(ref grpc_addr) = settings.grpc.relay_server_address {
+            let grpc_addr: std::net::SocketAddr = grpc_addr.parse().expect("invalid grpc relay_server_address");
+            let relay_service = crate::grpc_server::RelayService::new(
+                event_tx.clone(),
+                bcast_tx.clone(),
+                repo.clone(),
+                settings.clone(),
+            );
+            let grpc_shutdown_rx = invoke_shutdown.subscribe();
+            tokio::spawn(async move {
+                info!("gRPC relay server listening on {}", grpc_addr);
+                if let Err(e) = tonic::transport::Server::builder()
+                    .add_service(crate::grpc_convert::relay_proto::relay_server::RelayServer::new(relay_service))
+                    .serve_with_shutdown(grpc_addr, async {
+                        let mut rx = grpc_shutdown_rx;
+                        let _ = rx.recv().await;
+                    })
+                    .await
+                {
+                    eprintln!("gRPC server error: {e}");
+                }
+            });
+        }
+
         let server = Server::bind(&socket_addr)
             .serve(make_svc)
             .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen));

@@ -6,6 +6,8 @@ pub mod db;
 pub mod delegation;
 pub mod error;
 pub mod event;
+pub mod grpc_convert;
+pub mod grpc_server;
 pub mod info;
 pub mod nauthz;
 pub mod nip05;

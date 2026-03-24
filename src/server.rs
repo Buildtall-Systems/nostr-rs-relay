@@ -45,6 +45,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::io::Read;
 use std::net::SocketAddr;
+use sd_notify::NotifyState;
+use listenfd::ListenFd;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver as MpscReceiver;
@@ -691,6 +693,7 @@ async fn ctrl_c_or_signal(mut shutdown_signal: Receiver<()>) {
             },
         }
     }
+    let _ = sd_notify::notify(&[NotifyState::Stopping]);
 }
 
 fn create_metrics() -> (Registry, NostrMetrics) {
@@ -1019,9 +1022,26 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
             });
         }
 
-        let server = Server::bind(&socket_addr)
-            .serve(make_svc)
-            .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen));
+        let mut listenfd = ListenFd::from_env();
+        let server = match listenfd.take_tcp_listener(0) {
+            Ok(Some(listener)) => {
+                info!("using systemd socket activation");
+                Server::from_tcp(listener)
+                    .expect("failed to create server from systemd socket")
+                    .serve(make_svc)
+                    .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen))
+            }
+            _ => {
+                info!("binding to {}", socket_addr);
+                Server::bind(&socket_addr)
+                    .serve(make_svc)
+                    .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen))
+            }
+        };
+        let _ = sd_notify::notify(&[
+            NotifyState::Ready,
+            NotifyState::Status(&format!("Listening on {}", socket_addr)),
+        ]);
         // run hyper in this thread.  This is why the thread does not return.
         if let Err(e) = server.await {
             eprintln!("server error: {e}");

@@ -124,6 +124,26 @@ in
       '';
     };
 
+    socketActivation = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Enable systemd socket activation for zero-downtime restarts";
+      };
+
+      listenAddress = lib.mkOption {
+        type = lib.types.str;
+        default = "0.0.0.0";
+        description = "Address for the systemd socket to listen on";
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 8080;
+        description = "Port for the systemd socket to listen on";
+      };
+    };
+
     authz = {
       enable = lib.mkEnableOption "relay-authz authorization sidecar";
 
@@ -203,16 +223,32 @@ in
       };
     };
 
+    # Socket unit for zero-downtime restarts (optional)
+    systemd.sockets.nostr-relay = lib.mkIf cfg.socketActivation.enable {
+      description = "Nostr Relay Socket";
+      wantedBy = [ "sockets.target" ];
+
+      socketConfig = {
+        ListenStream = "${cfg.socketActivation.listenAddress}:${toString cfg.socketActivation.port}";
+        FreeBind = true;
+        ReusePort = true;
+        NoDelay = true;
+        FileDescriptorName = "http";
+      };
+    };
+
     # Main relay service
     systemd.services.nostr-relay = {
       description = "Nostr Relay (nostr-rs-relay)";
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = lib.mkIf (!cfg.socketActivation.enable) [ "multi-user.target" ];
       after = [ "network.target" ]
         ++ lib.optional cfg.authz.enable "relay-authz.service";
-      requires = lib.optional cfg.authz.enable "relay-authz.service";
+      requires = lib.optional cfg.authz.enable "relay-authz.service"
+        ++ lib.optional cfg.socketActivation.enable "nostr-relay.socket";
 
       serviceConfig = {
-        Type = "simple";
+        Type = "notify";
+        NotifyAccess = "main";
         User = cfg.user;
         Group = cfg.group;
         WorkingDirectory = cfg.dataDir;

@@ -5,3 +5,4 @@ justfile
 result
 **/.idea/
 ai/
+scratch/

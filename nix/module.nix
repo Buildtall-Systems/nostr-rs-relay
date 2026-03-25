@@ -127,7 +127,7 @@ in
     socketActivation = {
       enable = lib.mkOption {
         type = lib.types.bool;
-        default = true;
+        default = false;
         description = "Enable systemd socket activation for zero-downtime restarts";
       };
 

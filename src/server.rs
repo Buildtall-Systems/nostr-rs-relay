@@ -1023,24 +1023,34 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
         }
 
         let mut listenfd = ListenFd::from_env();
-        let server = match listenfd.take_tcp_listener(0) {
+        let (server, listen_addr) = match listenfd.take_tcp_listener(0) {
             Ok(Some(listener)) => {
-                info!("using systemd socket activation");
-                Server::from_tcp(listener)
+                let addr = listener.local_addr().unwrap_or(socket_addr);
+                info!("using systemd socket activation on {}", addr);
+                let srv = Server::from_tcp(listener)
                     .expect("failed to create server from systemd socket")
                     .serve(make_svc)
-                    .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen))
+                    .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen));
+                (srv, addr)
             }
-            _ => {
+            Ok(None) => {
                 info!("binding to {}", socket_addr);
-                Server::bind(&socket_addr)
+                let srv = Server::bind(&socket_addr)
                     .serve(make_svc)
-                    .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen))
+                    .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen));
+                (srv, socket_addr)
+            }
+            Err(e) => {
+                warn!("failed to acquire systemd socket: {}, falling back to bind", e);
+                let srv = Server::bind(&socket_addr)
+                    .serve(make_svc)
+                    .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen));
+                (srv, socket_addr)
             }
         };
         let _ = sd_notify::notify(&[
             NotifyState::Ready,
-            NotifyState::Status(&format!("Listening on {}", socket_addr)),
+            NotifyState::Status(&format!("Listening on {}", listen_addr)),
         ]);
         // run hyper in this thread.  This is why the thread does not return.
         if let Err(e) = server.await {

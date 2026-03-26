@@ -1,29 +1,15 @@
-# [nostr-rs-relay](https://git.sr.ht/~gheartsfield/nostr-rs-relay)
+# nostr-rs-relay
 
-This is a [nostr](https://github.com/nostr-protocol/nostr) relay,
-written in Rust.  It currently supports the entire relay protocol, and
-persists data with SQLite.  There is experimental support for
-Postgresql.
+A [Nostr](https://github.com/nostr-protocol/nostr) relay written in Rust. This is a [buildtall.systems](https://buildtall.systems) fork of [nostr-rs-relay](https://git.sr.ht/~gheartsfield/nostr-rs-relay) by Greg Heartsfield.
 
-The project master repository is available on
-[sourcehut](https://sr.ht/~gheartsfield/nostr-rs-relay/), and is
-mirrored on [GitHub](https://github.com/scsibug/nostr-rs-relay).
+## What Upstream Provides
 
-[![builds.sr.ht status](https://builds.sr.ht/~gheartsfield/nostr-rs-relay/commits/master.svg)](https://builds.sr.ht/~gheartsfield/nostr-rs-relay/commits/master?)
+The upstream relay is a complete NIP-compliant WebSocket relay with SQLite persistence, rate limiting, event size limits, NIP-42 authentication, and gRPC event admission hooks. It handles the core Nostr protocol:
 
-![Github CI](https://github.com/scsibug/nostr-rs-relay/actions/workflows/ci.yml/badge.svg)
-
-
-## Features
-
-[NIPs](https://github.com/nostr-protocol/nips) with a relay-specific implementation are listed here.
+### NIP Support (upstream)
 
 - [x] NIP-01: [Basic protocol flow description](https://github.com/nostr-protocol/nips/blob/master/01.md)
-  * Core event model
-  * Hide old metadata events
-  * Id/Author prefix search
 - [x] NIP-02: [Contact List and Petnames](https://github.com/nostr-protocol/nips/blob/master/02.md)
-- [ ] NIP-03: [OpenTimestamps Attestations for Events](https://github.com/nostr-protocol/nips/blob/master/03.md)
 - [x] NIP-05: [Mapping Nostr keys to DNS-based internet identifiers](https://github.com/nostr-protocol/nips/blob/master/05.md)
 - [x] NIP-09: [Event Deletion](https://github.com/nostr-protocol/nips/blob/master/09.md)
 - [x] NIP-11: [Relay Information Document](https://github.com/nostr-protocol/nips/blob/master/11.md)
@@ -31,139 +17,141 @@ mirrored on [GitHub](https://github.com/scsibug/nostr-rs-relay).
 - [x] NIP-15: [End of Stored Events Notice](https://github.com/nostr-protocol/nips/blob/master/15.md)
 - [x] NIP-16: [Event Treatment](https://github.com/nostr-protocol/nips/blob/master/16.md)
 - [x] NIP-20: [Command Results](https://github.com/nostr-protocol/nips/blob/master/20.md)
-- [x] NIP-22: [Event `created_at` limits](https://github.com/nostr-protocol/nips/blob/master/22.md) (_future-dated events only_)
-- [ ] NIP-26: [Event Delegation](https://github.com/nostr-protocol/nips/blob/master/26.md) (_implemented, but currently disabled_)
+- [x] NIP-22: [Event `created_at` limits](https://github.com/nostr-protocol/nips/blob/master/22.md) (future-dated events only)
 - [x] NIP-28: [Public Chat](https://github.com/nostr-protocol/nips/blob/master/28.md)
 - [x] NIP-33: [Parameterized Replaceable Events](https://github.com/nostr-protocol/nips/blob/master/33.md)
 - [x] NIP-40: [Expiration Timestamp](https://github.com/nostr-protocol/nips/blob/master/40.md)
 - [x] NIP-42: [Authentication of clients to relays](https://github.com/nostr-protocol/nips/blob/master/42.md)
 
-## Quick Start
+Upstream also provides the gRPC event admission interface (`nauthz.proto`) — an extensibility hook that allows external programs to approve or reject incoming events. See [gRPC Extensions](docs/grpc-extensions.md) for the upstream design document.
 
-The provided `Dockerfile` will compile and build the server
-application.  Use a bind mount to store the SQLite database outside of
-the container image, and map the container's 8080 port to a host port
-(7000 in the example below).
+## What Buildtall Adds
 
-The examples below start a rootless podman container, mapping a local
-data directory and config file.
+Everything below is buildtall.systems work on top of the upstream relay.
 
-```console
-$ podman build --pull -t nostr-rs-relay .
+### gRPC Relay Service
 
-$ mkdir data
+A tonic-based gRPC server exposes the full relay protocol for machine-to-machine communication. Defined in `proto/relay.proto` under the `nostr.relay.v1.Relay` service:
 
-$ podman unshare chown 100:100 data
+| RPC | Description |
+|-----|-------------|
+| `Publish` | Submit a signed event |
+| `Subscribe` | Server-streaming subscription with EOSE |
+| `Unsubscribe` | Close a subscription |
+| `Auth` | NIP-42 authentication (kind 22242) |
+| `Query` | One-shot batch query (no subscription) |
 
-$ podman run -it --rm -p 7000:8080 \
-  --user=100:100 \
-  -v $(pwd)/data:/usr/src/app/db:Z \
-  -v $(pwd)/config.toml:/usr/src/app/config.toml:ro,Z \
-  --name nostr-relay nostr-rs-relay:latest
+Enable by setting `relay_server_address` in `config.toml`:
 
-Nov 19 15:31:15.013  INFO nostr_rs_relay: Starting up from main
-Nov 19 15:31:15.017  INFO nostr_rs_relay::server: listening on: 0.0.0.0:8080
-Nov 19 15:31:15.019  INFO nostr_rs_relay::server: db writer created
-Nov 19 15:31:15.019  INFO nostr_rs_relay::server: control message listener started
-Nov 19 15:31:15.019  INFO nostr_rs_relay::db: Built a connection pool "event writer" (min=1, max=4)
-Nov 19 15:31:15.019  INFO nostr_rs_relay::db: opened database "/usr/src/app/db/nostr.db" for writing
-Nov 19 15:31:15.019  INFO nostr_rs_relay::schema: DB version = 0
-Nov 19 15:31:15.054  INFO nostr_rs_relay::schema: database pragma/schema initialized to v7, and ready
-Nov 19 15:31:15.054  INFO nostr_rs_relay::schema: All migration scripts completed successfully.  Welcome to v7.
-Nov 19 15:31:15.521  INFO nostr_rs_relay::db: Built a connection pool "client query" (min=4, max=128)
+```toml
+[grpc]
+relay_server_address = "[::1]:50053"
 ```
 
-Use a `nostr` client such as
-[`noscl`](https://github.com/fiatjaf/noscl) to publish and query
-events.
+Disabled by default. See [gRPC Extensions](docs/grpc-extensions.md) for design details.
 
-```console
-$ noscl publish "hello world"
-Sent to 'ws://localhost:8090'.
-Seen it on 'ws://localhost:8090'.
-$ noscl home
-Text Note [81cf...2652] from 296a...9b92 5 seconds ago
-  hello world
+### relay-authz Integration
+
+The upstream relay provides a generic gRPC event admission hook. Buildtall wires this to relay-authz, our authorization sidecar that manages trust tiers and write access. The NixOS module (below) manages relay-authz as a companion service automatically — generating its config, seeding admin npubs, and configuring the gRPC connection between relay and sidecar.
+
+```toml
+[grpc]
+event_admission_server = "http://[::1]:50051"
+restricts_write = true
 ```
 
-A pre-built container is also available on DockerHub:
-https://hub.docker.com/r/scsibug/nostr-rs-relay
+### Systemd Socket Activation
 
-## Build and Run (without Docker)
+Zero-downtime restarts via systemd socket passing. When enabled, systemd holds the listening socket and passes it to the relay on startup. During `systemctl restart`, new connections queue in the kernel TCP backlog while the relay restarts.
 
-Building `nostr-rs-relay` requires an installation of Cargo & Rust: https://www.rust-lang.org/tools/install
+The relay:
+- Accepts sockets from systemd via `LISTEN_FDS` (listenfd crate)
+- Sends `READY=1` with actual listen address to systemd on startup
+- Sends `STOPPING=1` on graceful shutdown
+- Falls back to standard bind if no systemd socket is present
 
-The following OS packages will be helpful; on Debian/Ubuntu:
-```console
-$ sudo apt-get install build-essential cmake protobuf-compiler pkg-config libssl-dev
+### Nix Packaging and NixOS Module
+
+Buildtall adds a Nix flake (`flake.nix`) that builds the relay with crane and provides a declarative NixOS module for production deployment:
+
+```nix
+{
+  services.nostr-relay = {
+    enable = true;
+
+    settings = {
+      info = {
+        relay_url = "wss://relay.example.com/";
+        name = "My Relay";
+      };
+      network = {
+        address = "127.0.0.1";
+        port = 7777;
+      };
+      authorization.nip42_auth = true;
+    };
+
+    # Socket activation for zero-downtime restarts
+    socketActivation = {
+      enable = true;
+      listenAddress = "0.0.0.0";
+      port = 8080;
+    };
+
+    # Optional: relay-authz sidecar
+    authz = {
+      enable = true;
+      grpcAddress = "[::1]:50051";
+      adminNpubs = [ "npub1..." ];
+    };
+  };
+}
 ```
 
-On OpenBSD:
-```console
-$ doas pkg_add rust protobuf
-```
+The module manages:
+- System user/group creation
+- TOML config generation from `settings`
+- systemd service (`Type=notify`) with hardening
+- Optional socket unit for zero-downtime restarts
+- Optional relay-authz sidecar with config generation
 
-Clone this repository, and then build a release version of the relay:
+## Building and Running
 
-```console
-$ git clone -q https://git.sr.ht/\~gheartsfield/nostr-rs-relay
-$ cd nostr-rs-relay
-$ cargo build -q -r
-```
-
-The relay executable is now located in
-`target/release/nostr-rs-relay`.  In order to run it with logging
-enabled, execute it with the `RUST_LOG` variable set:
+### With Nix (recommended)
 
 ```console
-$ RUST_LOG=warn,nostr_rs_relay=info ./target/release/nostr-rs-relay
-Dec 26 10:31:56.455  INFO nostr_rs_relay: Starting up from main
-Dec 26 10:31:56.464  INFO nostr_rs_relay::server: listening on: 0.0.0.0:8080
-Dec 26 10:31:56.466  INFO nostr_rs_relay::server: db writer created
-Dec 26 10:31:56.466  INFO nostr_rs_relay::db: Built a connection pool "event writer" (min=1, max=2)
-Dec 26 10:31:56.466  INFO nostr_rs_relay::db: opened database "./nostr.db" for writing
-Dec 26 10:31:56.466  INFO nostr_rs_relay::schema: DB version = 11
-Dec 26 10:31:56.467  INFO nostr_rs_relay::db: Built a connection pool "maintenance writer" (min=1, max=2)
-Dec 26 10:31:56.467  INFO nostr_rs_relay::server: control message listener started
-Dec 26 10:31:56.468  INFO nostr_rs_relay::db: Built a connection pool "client query" (min=4, max=8)
+$ nix build
+$ ./result/bin/nostr-rs-relay --config config.toml
 ```
 
-You now have a running relay, on port `8080`.  Use a `nostr` client or
-`websocat` to connect and send/query for events.
+### From Source
+
+Requires Rust, protobuf compiler, and pkg-config:
+
+```console
+$ nix develop  # or: apt install build-essential cmake protobuf-compiler pkg-config libssl-dev
+$ cargo build --release
+$ RUST_LOG=warn,nostr_rs_relay=info ./target/release/nostr-rs-relay -c config.toml
+```
 
 ## Configuration
 
-The sample [`config.toml`](config.toml) file demonstrates the
-configuration available to the relay.  This file is optional, but may
-be mounted into a docker container like so:
+See [`config.toml`](config.toml) for all available options. Key sections:
 
-```console
-$ docker run -it -p 7000:8080 \
-  --mount src=$(pwd)/config.toml,target=/usr/src/app/config.toml,type=bind \
-  --mount src=$(pwd)/data,target=/usr/src/app/db,type=bind \
-  --mount src=$(pwd)/index.html,target=/usr/src/app/index.html,type=bind \
-  nostr-rs-relay
-```
+| Section | Purpose |
+|---------|---------|
+| `[info]` | Relay metadata (NIP-11) |
+| `[database]` | SQLite data directory |
+| `[network]` | Bind address, port, remote IP header |
+| `[grpc]` | Event admission server, gRPC relay server |
+| `[authorization]` | NIP-42 auth settings |
+| `[limits]` | Rate limiting, event size, connection limits |
+| `[logging]` | Log file path and prefix |
 
-Options include rate-limiting, event size limits, and network address
-settings.
+## Reverse Proxy
 
-## Reverse Proxy Configuration
+See [Reverse Proxy](docs/reverse-proxy.md) for nginx/Caddy configuration examples.
 
-For examples of putting the relay behind a reverse proxy (for TLS
-termination, load balancing, and other features), see [Reverse
-Proxy](docs/reverse-proxy.md).
+## License
 
-## Dev Channel
-
-For development discussions, please feel free to use the [sourcehut
-mailing list](https://lists.sr.ht/~gheartsfield/nostr-rs-relay-devel).
-
-License
----
-This project is MIT licensed.
-
-External Documentation and Links
----
-
-* [BlockChainCaffe's Nostr Relay Setup Guide](https://github.com/BlockChainCaffe/Nostr-Relay-Setup-Guide)
+MIT. Original work by [Greg Heartsfield](https://git.sr.ht/~gheartsfield/nostr-rs-relay).

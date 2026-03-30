@@ -117,15 +117,9 @@ let
           description = "External config.yaml path (e.g., from sops). When null, generated from options.";
         };
 
-        seedFile = lib.mkOption {
-          type = lib.types.nullOr lib.types.path;
-          default = null;
-          description = "External seed-admins.yaml path (e.g., from sops). When null, generated from adminNpubs.";
-        };
-
         grpcAddress = lib.mkOption {
           type = lib.types.str;
-          default = "[::1]:50051";
+          default = "[::1]:50052";
           description = "gRPC listen address for authz service";
         };
 
@@ -137,7 +131,7 @@ let
 
         publicBaseUrl = lib.mkOption {
           type = lib.types.str;
-          default = "https://auth.nostr.io";
+          default = "http://localhost:8090";
           description = "Public base URL for the authz HTTP service";
         };
 
@@ -150,7 +144,33 @@ let
         adminNpubs = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [];
-          description = "List of admin npubs to seed on startup. Ignored when seedFile is set.";
+          description = "List of admin npubs with dashboard access and NIP-51 list authority.";
+        };
+
+        seedNpubs = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [];
+          description = "List of always-authorized non-admin writer npubs loaded on startup.";
+        };
+
+        relay = {
+          url = lib.mkOption {
+            type = lib.types.str;
+            default = "ws://127.0.0.1:7780";
+            description = "WebSocket URL of the Nostr relay to watch for NIP-51 list updates";
+          };
+
+          nip51DTag = lib.mkOption {
+            type = lib.types.str;
+            default = "dev-writers";
+            description = "NIP-51 d-tag for the writer allow list";
+          };
+
+          signingKeyHex = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = "Hex-encoded signing key for NIP-51 list publishing";
+          };
         };
       };
     };
@@ -176,20 +196,20 @@ let
 
       generatedAuthzConfig = pkgs.writeText "${name}-authz.yaml" (lib.generators.toYAML {} {
         log_level = inst.authz.logLevel;
-        database_dir = inst.dataDir;
-        grpc.listen_address = inst.authz.grpcAddress;
-        http.listen_address = inst.authz.httpAddress;
-        http.public_base_url = inst.authz.publicBaseUrl;
+        grpc = { listen_address = inst.authz.grpcAddress; };
+        http = {
+          listen_address = inst.authz.httpAddress;
+          public_base_url = inst.authz.publicBaseUrl;
+        };
+        relay = {
+          url = inst.authz.relay.url;
+          nip51_d_tag = inst.authz.relay.nip51DTag;
+          signing_key_hex = inst.authz.relay.signingKeyHex;
+        };
+        admin_npubs = inst.authz.adminNpubs;
+        seed_npubs = inst.authz.seedNpubs;
       });
       authzConfig = if inst.authz.configFile != null then inst.authz.configFile else generatedAuthzConfig;
-
-      generatedSeedConfig = pkgs.writeText "${name}-seed-admins.yaml" (lib.generators.toYAML {} {
-        admin_npubs = inst.authz.adminNpubs;
-      });
-      seedConfig = if inst.authz.seedFile != null then inst.authz.seedFile else generatedSeedConfig;
-
-      hasSeed = inst.authz.seedFile != null || inst.authz.adminNpubs != [];
-      seedFlag = lib.optionalString hasSeed " --seed ${seedConfig}";
     in
     {
       users = lib.mkIf inst.createUser {
@@ -214,7 +234,7 @@ let
             User = inst.user;
             Group = inst.group;
             WorkingDirectory = "${inst.authz.package}/share/relay-authz";
-            ExecStart = "${inst.authz.package}/bin/relay-authz --config ${authzConfig}${seedFlag}";
+            ExecStart = "${inst.authz.package}/bin/relay-authz --config ${authzConfig}";
             Restart = "always";
             RestartSec = 5;
             NoNewPrivileges = true;

@@ -13,7 +13,7 @@
 { config, pkgs, ... }:
 
 {
-  services.nostr-relay = {
+  services.nostr-relay.instances.my-relay = {
     enable = true;
 
     user = "nostr";
@@ -50,11 +50,14 @@
     authz = {
       enable = true;
       logLevel = "INFO";
-      listenAddress = "[::1]:50051";
-      allowedNpubs = [
+      adminNpubs = [
         "npub1mkq63wkt4v94cvq869njlwpszwpmf62c84p3sdvc2ptjy04jnzjs20r4tx"
         # Add more npubs as needed
       ];
+      relay = {
+        url = "ws://127.0.0.1:7777";
+        nip51DTag = "relay-writers";
+      };
     };
   };
 

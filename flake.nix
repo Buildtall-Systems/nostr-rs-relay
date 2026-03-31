@@ -12,8 +12,6 @@
     };
 
     crane.url = "github:ipetkov/crane";
-
-    buildtall.url = "git+ssh://git@github.com/Buildtall-Systems/buildtall.git";
   };
 
   outputs = inputs@{ self, ... }:
@@ -67,7 +65,6 @@
       # System-independent outputs
       nixosModules.default = import ./nix/module.nix {
         inherit self;
-        buildtall = inputs.buildtall;
       };
       nixosModules.nostr-relay = self.nixosModules.default;
     };

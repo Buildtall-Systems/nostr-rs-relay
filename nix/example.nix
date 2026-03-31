@@ -46,19 +46,8 @@
       };
     };
 
-    # Enable the NIP-42 authorization sidecar
-    authz = {
-      enable = true;
-      logLevel = "INFO";
-      adminNpubs = [
-        "npub1mkq63wkt4v94cvq869njlwpszwpmf62c84p3sdvc2ptjy04jnzjs20r4tx"
-        # Add more npubs as needed
-      ];
-      relay = {
-        url = "ws://127.0.0.1:7777";
-        nip51DTag = "relay-writers";
-      };
-    };
+    # For NIP-42 authorization, use the standalone relay-authz module
+    # from the buildtall flake (services.relay-authz.instances.*)
   };
 
   # Optional: nginx reverse proxy with TLS

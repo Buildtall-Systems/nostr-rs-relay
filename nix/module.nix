@@ -166,10 +166,10 @@ let
             description = "NIP-51 d-tag for the writer allow list";
           };
 
-          signingKeyHex = lib.mkOption {
+          signingNsec = lib.mkOption {
             type = lib.types.str;
             default = "";
-            description = "Hex-encoded signing key for NIP-51 list publishing";
+            description = "NIP-19 nsec for NIP-51 list publishing (decoded to hex at relay-authz boundary)";
           };
         };
       };
@@ -204,7 +204,7 @@ let
         relay = {
           url = inst.authz.relay.url;
           nip51_d_tag = inst.authz.relay.nip51DTag;
-          signing_key_hex = inst.authz.relay.signingKeyHex;
+          signing_nsec = inst.authz.relay.signingNsec;
         };
         admin_npubs = inst.authz.adminNpubs;
         seed_npubs = inst.authz.seedNpubs;

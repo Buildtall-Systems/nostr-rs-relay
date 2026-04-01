@@ -41,20 +41,20 @@ pub struct ClientConn {
 
 impl Default for ClientConn {
     fn default() -> Self {
-        Self::new("unknown".to_owned())
+        Self::new("unknown".to_owned(), 128)
     }
 }
 
 impl ClientConn {
     /// Create a new, empty connection state.
     #[must_use]
-    pub fn new(client_ip_addr: String) -> Self {
+    pub fn new(client_ip_addr: String, max_subs: usize) -> Self {
         let client_id = Uuid::new_v4();
         ClientConn {
             client_ip_addr,
             client_id,
             subscriptions: HashMap::new(),
-            max_subs: 32,
+            max_subs,
             auth: NoAuth,
         }
     }

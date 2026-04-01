@@ -43,6 +43,7 @@
         messages_per_sec = 5;
         max_event_bytes = 131072;
         max_ws_message_bytes = 131072;
+        max_subs = 128; # concurrent subscriptions per WebSocket connection
       };
     };
 

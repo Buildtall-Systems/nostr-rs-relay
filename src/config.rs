@@ -76,6 +76,7 @@ pub struct Limits {
     pub event_persist_buffer: usize, // events to buffer for database commits (block senders if database writes are too slow)
     pub event_kind_blacklist: Option<Vec<u64>>,
     pub event_kind_allowlist: Option<Vec<u64>>,
+    pub max_subs: usize,
     pub limit_scrapers: bool,
 }
 
@@ -322,6 +323,7 @@ impl Default for Settings {
                 event_persist_buffer: 4096,
                 event_kind_blacklist: None,
                 event_kind_allowlist: None,
+                max_subs: 128,
                 limit_scrapers: false,
             },
             authorization: Authorization {

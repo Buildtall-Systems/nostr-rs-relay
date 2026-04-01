@@ -158,6 +158,10 @@ reject_future_seconds = 1800
 #    0, 1, 2, 3, 7, 40, 41, 42, 43, 44, 30023,
 #]
 
+# Maximum number of concurrent subscriptions per WebSocket connection.
+# Defaults to 128 if not set.
+#max_subs = 128
+
 # Rejects imprecise requests (kind only and author only etc)
 # This is a temperary measure to improve the adoption of outbox model
 # Its recommended to have this enabled

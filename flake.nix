@@ -44,10 +44,30 @@
             pkgs.protobuf
           ];
         };
+        clippy = craneLib.cargoClippy {
+          name = "nostr-rs-relay";
+          inherit src;
+          cargoArtifacts = craneLib.buildDepsOnly {
+            name = "nostr-rs-relay";
+            inherit src;
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.protobuf
+            ];
+          };
+          # Findings are reported, not denied: this fork carries upstream
+          # (scsibug/nostr-rs-relay) code as-is, and upstream findings are
+          # not ours to fix. Fork-authored code must stay finding-free.
+          cargoClippyExtraArgs = "--all-targets";
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.protobuf
+          ];
+        };
       in
       {
         checks = {
-          inherit crate;
+          inherit crate clippy;
         };
         packages = {
           default = crate;

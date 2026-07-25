@@ -1,10 +1,19 @@
-.PHONY: build run clean
+.PHONY: build run clean lint test
+
+NIXSYS := $(shell nix eval --impure --raw --expr builtins.currentSystem)
 
 build:
-	nix-shell -p protobuf --run "cargo build --release"
+	nix build .#nostr-rs-relay
 
 run: build
-	./target/release/nostr-rs-relay
+	./result/bin/nostr-rs-relay
+
+lint:
+	nix build .#checks.$(NIXSYS).clippy --no-link
+
+test:
+	nix build .#checks.$(NIXSYS).crate --no-link
 
 clean:
 	cargo clean
+	rm -f result

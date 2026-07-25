@@ -9,13 +9,16 @@ mod tests {
     use nostr_rs_relay::conn::ClientConn;
     use nostr_rs_relay::error::Error;
     use nostr_rs_relay::event::Event;
+    use nostr_rs_relay::subscription::Subscription;
     use nostr_rs_relay::utils::unix_time;
 
     const RELAY: &str = "wss://nostr.example.com/";
+    // Default per-connection subscription cap, matching Settings::default().
+    const TEST_MAX_SUBS: usize = 128;
 
     #[test]
     fn test_generate_auth_challenge() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -38,8 +41,35 @@ mod tests {
     }
 
     #[test]
+    fn test_max_subs_enforced() {
+        let cap: usize = 3;
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), cap);
+
+        for n in 0..cap {
+            let sub = req_subscription(&format!("sub-{n}"));
+            assert!(matches!(client_conn.subscribe(sub), Ok(())));
+        }
+        assert_eq!(client_conn.subscriptions().len(), cap);
+
+        let over_cap = req_subscription("sub-over-cap");
+        let result = client_conn.subscribe(over_cap);
+        assert!(matches!(result, Err(Error::SubMaxExceededError)));
+        assert_eq!(client_conn.subscriptions().len(), cap);
+
+        // replacing an existing subscription id must not count against the cap
+        let replacement = req_subscription("sub-0");
+        assert!(matches!(client_conn.subscribe(replacement), Ok(())));
+        assert_eq!(client_conn.subscriptions().len(), cap);
+    }
+
+    fn req_subscription(id: &str) -> Subscription {
+        let req = format!(r#"["REQ","{id}",{{"kinds":[1]}}]"#);
+        serde_json::from_str(&req).unwrap()
+    }
+
+    #[test]
     fn test_authenticate_with_valid_event() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -61,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_in_invalid_state() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -74,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_authenticate_when_already_authenticated() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -104,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_with_invalid_event() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -125,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_with_invalid_event_kind() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -145,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_with_expired_timestamp() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -165,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_with_future_timestamp() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -185,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_without_tags() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -204,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_without_challenge() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -223,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_without_relay() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -243,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_with_invalid_challenge() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);
@@ -262,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_fail_to_authenticate_with_invalid_relay() {
-        let mut client_conn = ClientConn::new("127.0.0.1".into());
+        let mut client_conn = ClientConn::new("127.0.0.1".into(), TEST_MAX_SUBS);
 
         assert_eq!(client_conn.auth_challenge(), None);
         assert_eq!(client_conn.auth_pubkey(), None);

@@ -54,7 +54,7 @@ pub fn main() -> Result<()> {
         let mut tags: u64 = 0;
         while let Some(row) = rows.next()? {
             events += 1;
-            if events % 10_000 == 0 {
+            if events.is_multiple_of(10_000) {
                 info!("processed {} events...", events);
             }
             let event_id: u64 = row.get(0)?;

@@ -22,6 +22,7 @@ The upstream relay is a complete NIP-compliant WebSocket relay with SQLite persi
 - [x] NIP-33: [Parameterized Replaceable Events](https://github.com/nostr-protocol/nips/blob/master/33.md)
 - [x] NIP-40: [Expiration Timestamp](https://github.com/nostr-protocol/nips/blob/master/40.md)
 - [x] NIP-42: [Authentication of clients to relays](https://github.com/nostr-protocol/nips/blob/master/42.md)
+- [x] NIP-91: [AND operator for filters](https://github.com/nostr-protocol/nips/pull/1365)
 
 Upstream also provides the gRPC event admission interface (`nauthz.proto`) — an extensibility hook that allows external programs to approve or reject incoming events. See [gRPC Extensions](docs/grpc-extensions.md) for the upstream design document.
 

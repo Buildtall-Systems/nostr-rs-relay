@@ -23,7 +23,7 @@ pragma mmap_size = 0; -- disable mmap (default)
 "##;
 
 /// Latest database version
-pub const DB_VERSION: usize = 18;
+pub const DB_VERSION: usize = 19;
 
 /// Schema definition
 const INIT_SQL: &str = formatcp!(
@@ -43,6 +43,7 @@ id INTEGER PRIMARY KEY,
 event_hash BLOB NOT NULL, -- 32-byte SHA256 hash
 first_seen INTEGER NOT NULL, -- when the event was first seen (not authored!) (seconds since 1970)
 created_at INTEGER NOT NULL, -- when the event was authored
+published_at INTEGER, -- publication time: first published_at tag value, else created_at
 expires_at INTEGER, -- when the event expires and may be deleted
 author BLOB NOT NULL, -- author pubkey
 delegated_by BLOB, -- delegator pubkey (NIP-26)
@@ -63,6 +64,8 @@ CREATE INDEX IF NOT EXISTS kind_created_at_index ON event(kind,created_at);
 CREATE INDEX IF NOT EXISTS author_created_at_index ON event(author,created_at);
 CREATE INDEX IF NOT EXISTS author_kind_index ON event(author,kind);
 CREATE INDEX IF NOT EXISTS event_expiration ON event(expires_at);
+CREATE INDEX IF NOT EXISTS kind_published_at_index ON event(kind,published_at);
+CREATE INDEX IF NOT EXISTS author_published_at_index ON event(author,published_at);
 
 -- Tag Table
 -- Tag values are stored as either a BLOB (if they come in as a
@@ -244,6 +247,9 @@ pub fn upgrade_db(conn: &mut PooledConnection) -> Result<usize> {
             }
             if curr_version == 17 {
                 curr_version = mig_17_to_18(conn)?;
+            }
+            if curr_version == 18 {
+                curr_version = mig_18_to_19(conn)?;
             }
 
             if curr_version == DB_VERSION {
@@ -838,4 +844,133 @@ PRAGMA user_version = 18;
         }
     }
     Ok(18)
+}
+
+fn mig_18_to_19(conn: &mut PooledConnection) -> Result<usize> {
+    let count = db_event_count(conn)?;
+    info!("database schema needs update from 18->19");
+    let upgrade_sql = r##"
+ALTER TABLE event ADD COLUMN published_at INTEGER; -- publication time: first published_at tag value, else created_at
+"##;
+    let start = Instant::now();
+    let tx = conn.transaction()?;
+
+    let bar = ProgressBar::new(count.try_into().unwrap()).with_message("deriving published_at");
+    bar.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.white/blue} {pos:>7}/{len:7} [{percent}%] {msg}",
+        )
+        .unwrap(),
+    );
+    {
+        tx.execute_batch(upgrade_sql)?;
+        let mut stmt = tx.prepare("select id, content from event order by id;")?;
+        let mut update_stmt = tx.prepare("UPDATE event SET published_at=?1 WHERE id=?2;")?;
+        let mut event_rows = stmt.query([])?;
+        let mut count = 0;
+        while let Some(row) = event_rows.next()? {
+            count += 1;
+            if count % 10 == 0 {
+                bar.inc(10);
+            }
+            let event_id: u64 = row.get(0)?;
+            let event_json: String = row.get(1)?;
+            let event: Event = serde_json::from_str(&event_json)?;
+            update_stmt.execute(params![event.published_time(), event_id])?;
+        }
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS kind_published_at_index ON event(kind,published_at);",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS author_published_at_index ON event(author,published_at);",
+            [],
+        )?;
+        tx.execute("PRAGMA user_version = 19;", [])?;
+    }
+    bar.finish();
+    tx.commit()?;
+    info!(
+        "database schema upgraded v18 -> v19 in {:?}",
+        start.elapsed()
+    );
+    Ok(19)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2d2_sqlite::SqliteConnectionManager;
+
+    const V18_EVENT_SQL: &str = r##"
+PRAGMA user_version = 18;
+CREATE TABLE event (
+id INTEGER PRIMARY KEY,
+event_hash BLOB NOT NULL,
+first_seen INTEGER NOT NULL,
+created_at INTEGER NOT NULL,
+expires_at INTEGER,
+author BLOB NOT NULL,
+delegated_by BLOB,
+kind INTEGER NOT NULL,
+hidden INTEGER,
+content TEXT NOT NULL
+);
+"##;
+
+    fn v18_conn() -> PooledConnection {
+        let manager = SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder().max_size(1).build(manager).unwrap();
+        let conn = pool.get().unwrap();
+        conn.execute_batch(V18_EVENT_SQL).unwrap();
+        conn
+    }
+
+    fn insert_v18_event(conn: &PooledConnection, id: u64, created_at: u64, tags_json: &str) {
+        let event_json = format!(
+            r##"{{"id":"{id}","pubkey":"aa","created_at":{created_at},"kind":30023,"tags":{tags_json},"content":"","sig":"0"}}"##
+        );
+        conn.execute(
+            "INSERT INTO event (id, event_hash, first_seen, created_at, author, kind, hidden, content) VALUES (?1, ?2, 0, ?3, ?4, 30023, FALSE, ?5);",
+            params![id, id.to_be_bytes().to_vec(), created_at, vec![0u8], event_json],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mig_18_to_19_backfills_published_at() {
+        let mut conn = v18_conn();
+        insert_v18_event(&conn, 1, 200, r##"[["published_at","100"]]"##);
+        insert_v18_event(&conn, 2, 300, "[]");
+        insert_v18_event(&conn, 3, 400, r##"[["published_at","2006-01-02"]]"##);
+
+        let version = upgrade_db(&mut conn).unwrap();
+        assert_eq!(version, DB_VERSION);
+
+        let user_version: usize = conn
+            .query_row("PRAGMA user_version;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(user_version, 19);
+
+        let published_at = |id: u64| -> u64 {
+            conn.query_row(
+                "SELECT published_at FROM event WHERE id=?1;",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(published_at(1), 100);
+        assert_eq!(published_at(2), 300);
+        assert_eq!(published_at(3), 400);
+
+        let index_count: usize = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('kind_published_at_index','author_published_at_index');",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 2);
+    }
 }

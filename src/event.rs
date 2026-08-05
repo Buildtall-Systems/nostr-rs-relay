@@ -317,6 +317,18 @@ impl Event {
             .collect()
     }
 
+    /// Publication time for ordering: the first `published_at` tag value
+    /// that parses as unix seconds, falling back to `created_at`.
+    #[must_use]
+    pub fn published_time(&self) -> u64 {
+        self.tags
+            .iter()
+            .filter(|x| x.len() > 1)
+            .filter(|x| x.first().unwrap() == "published_at")
+            .find_map(|x| x.get(1).unwrap().parse::<u64>().ok())
+            .unwrap_or(self.created_at)
+    }
+
     #[must_use]
     pub fn is_valid_timestamp(&self, reject_future_seconds: Option<usize>) -> bool {
         if let Some(allowable_future) = reject_future_seconds {
@@ -462,6 +474,49 @@ mod tests {
         let j = serde_json::to_string(&event)?;
         assert_eq!(j, "{\"id\":\"0\",\"pubkey\":\"0\",\"created_at\":0,\"kind\":0,\"tags\":[],\"content\":\"\",\"sig\":\"0\"}");
         Ok(())
+    }
+
+    #[test]
+    fn published_time_from_tag() {
+        let mut event = Event::simple_event();
+        event.created_at = 200;
+        event.tags = vec![vec!["published_at".to_owned(), "100".to_owned()]];
+        assert_eq!(event.published_time(), 100);
+    }
+
+    #[test]
+    fn published_time_missing_tag_falls_back() {
+        let mut event = Event::simple_event();
+        event.created_at = 200;
+        assert_eq!(event.published_time(), 200);
+    }
+
+    #[test]
+    fn published_time_unparseable_falls_back() {
+        let mut event = Event::simple_event();
+        event.created_at = 200;
+        event.tags = vec![vec!["published_at".to_owned(), "2006-01-02".to_owned()]];
+        assert_eq!(event.published_time(), 200);
+    }
+
+    #[test]
+    fn published_time_first_parseable_wins() {
+        let mut event = Event::simple_event();
+        event.created_at = 200;
+        event.tags = vec![
+            vec!["published_at".to_owned(), "not-a-number".to_owned()],
+            vec!["published_at".to_owned(), "100".to_owned()],
+            vec!["published_at".to_owned(), "50".to_owned()],
+        ];
+        assert_eq!(event.published_time(), 100);
+    }
+
+    #[test]
+    fn published_time_bare_tag_falls_back() {
+        let mut event = Event::simple_event();
+        event.created_at = 200;
+        event.tags = vec![vec!["published_at".to_owned()]];
+        assert_eq!(event.published_time(), 200);
     }
 
     #[test]

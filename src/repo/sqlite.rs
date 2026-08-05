@@ -138,8 +138,8 @@ impl SqliteRepo {
         }
         // ignore if the event hash is a duplicate.
         let mut ins_count = tx.execute(
-            "INSERT OR IGNORE INTO event (event_hash, created_at, expires_at, kind, author, delegated_by, content, first_seen, hidden) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s','now'), FALSE);",
-            params![id_blob, e.created_at, e.expiration(), e.kind, pubkey_blob, delegator_blob, event_str]
+            "INSERT OR IGNORE INTO event (event_hash, created_at, published_at, expires_at, kind, author, delegated_by, content, first_seen, hidden) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, strftime('%s','now'), FALSE);",
+            params![id_blob, e.created_at, e.published_time(), e.expiration(), e.kind, pubkey_blob, delegator_blob, event_str]
         )? as u64;
         if ins_count == 0 {
             // if the event was a duplicate, no need to insert event or

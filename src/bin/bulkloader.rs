@@ -132,8 +132,8 @@ fn write_event(tx: &Transaction, e: Event) -> Result<usize> {
     let event_str = serde_json::to_string(&e).ok();
     // ignore if the event hash is a duplicate.
     let ins_count = tx.execute(
-	"INSERT OR IGNORE INTO event (event_hash, created_at, kind, author, delegated_by, content, first_seen, hidden) VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'), FALSE);",
-	params![id_blob, e.created_at, e.kind, pubkey_blob, delegator_blob, event_str]
+	"INSERT OR IGNORE INTO event (event_hash, created_at, published_at, kind, author, delegated_by, content, first_seen, hidden) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s','now'), FALSE);",
+	params![id_blob, e.created_at, e.published_time(), e.kind, pubkey_blob, delegator_blob, event_str]
     )?;
     if ins_count == 0 {
         return Ok(0);

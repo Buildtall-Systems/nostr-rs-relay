@@ -81,6 +81,7 @@ async fn delete_expired(conn: PostgresPool) -> Result<u64> {
 #[async_trait]
 impl NostrRepo for PostgresRepo {
     async fn start(&self) -> Result<()> {
+        warn!("the order filter extension is sqlite-only; order-extended filters match nothing on postgres");
         // begin a cleanup task for expired events.
         cleanup_expired(self.conn_write.clone(), Duration::from_secs(600)).await?;
         Ok(())
@@ -718,6 +719,11 @@ fn query_from_filter(f: &'_ ReqFilter) -> Option<QueryBuilder<'_, Postgres>> {
     if f.force_no_match {
         return None;
     }
+    // the order extension is sqlite-only; match nothing rather than
+    // serve wrongly-ordered results.
+    if f.order.is_some() {
+        return None;
+    }
 
     let mut query = QueryBuilder::new("SELECT e.\"content\", e.created_at FROM \"event\" e");
 
@@ -945,7 +951,10 @@ mod tests {
                     "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
                 ])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let q = query_from_filter(&filter).unwrap();
@@ -967,7 +976,10 @@ mod tests {
                 'd',
                 TagOperand::Or(HashSet::from(["test".to_owned()])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let q = query_from_filter(&filter).unwrap();
@@ -992,7 +1004,10 @@ mod tests {
                     "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
                 ])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let q = query_from_filter(&filter).unwrap();
@@ -1015,7 +1030,10 @@ mod tests {
                     "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
                 ])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let q = query_from_filter(&filter).unwrap();
@@ -1040,7 +1058,10 @@ mod tests {
                     "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
                 ])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
         let q = query_from_filter(&filter).unwrap();
         assert_eq!(q.sql(), "SELECT e.\"content\", e.created_at FROM \"event\" e JOIN \"tag\" t1 on e.id = t1.event_id AND t1.\"name\" = $1 AND t1.\"value_hex\" = $2 JOIN \"tag\" t2 on e.id = t2.event_id AND t2.\"name\" = $3 AND t2.\"value_hex\" = $4 WHERE (e.pub_key in ($5) OR e.delegated_by in ($6)) AND e.kind in ($7) AND e.hidden != 1::bit(1) AND (e.expires_at IS NULL OR e.expires_at > now()) ORDER BY e.created_at ASC LIMIT 1000")
@@ -1056,7 +1077,10 @@ mod tests {
             authors: None,
             limit: None,
             tags: Some(HashMap::from([('a', TagOperand::And(HashSet::new()))])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
         assert!(query_from_filter(&filter).is_none());
     }

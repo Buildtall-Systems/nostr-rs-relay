@@ -34,6 +34,14 @@ impl Deref for TagOperand {
     }
 }
 
+/// Ordering axis for the opt-in `order` filter extension
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub enum Order {
+    /// Order by derived publication time: the first parseable
+    /// `published_at` tag value, else `created_at`.
+    PublishedAt,
+}
+
 /// Filter for requests
 ///
 /// Corresponds to client-provided subscription request elements.  Any
@@ -55,11 +63,20 @@ pub struct ReqFilter {
     pub limit: Option<u64>,
     /// Set of tags
     pub tags: Option<HashMap<char, TagOperand>>,
+    /// Opt-in result ordering axis (fork extension); absent means
+    /// stock NIP-01 `created_at` behavior.
+    pub order: Option<Order>,
+    /// Resume cursor event id paired with `until` (fork extension);
+    /// only valid alongside `order` and `until`.
+    pub until_id: Option<String>,
     /// Force no matches due to malformed data
     // we can't represent it in the req filter, so we don't want to
     // erroneously match.  This basically indicates the req tried to
     // do something invalid.
     pub force_no_match: bool,
+    /// Reason extension validation force-no-matched this filter,
+    /// surfaced to the client as a NOTICE.
+    pub extension_error: Option<String>,
 }
 
 impl Serialize for ReqFilter {
@@ -82,6 +99,14 @@ impl Serialize for ReqFilter {
         }
         if let Some(limit) = &self.limit {
             map.serialize_entry("limit", limit)?;
+        }
+        if let Some(order) = &self.order {
+            match order {
+                Order::PublishedAt => map.serialize_entry("order", "published_at")?,
+            }
+        }
+        if let Some(until_id) = &self.until_id {
+            map.serialize_entry("until_id", until_id)?;
         }
         if let Some(authors) = &self.authors {
             map.serialize_entry("authors", &authors)?;
@@ -116,10 +141,16 @@ impl<'de> Deserialize<'de> for ReqFilter {
             authors: None,
             limit: None,
             tags: None,
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
         let empty_string = "".into();
         let mut ts: Option<HashMap<char, TagOperand>> = None;
+        // key iteration order is arbitrary, so until_id is validated
+        // after the loop, once order and until are known.
+        let mut until_id_raw: Option<&Value> = None;
         // iterate through each key, and assign values that exist
         for (key, val) in filter {
             // ids
@@ -153,6 +184,16 @@ impl<'de> Deserialize<'de> for ReqFilter {
                     }
                 }
                 rf.authors = raw_authors;
+            } else if key == "order" {
+                match val.as_str() {
+                    Some("published_at") => rf.order = Some(Order::PublishedAt),
+                    _ => {
+                        rf.force_no_match = true;
+                        rf.extension_error = Some("order: unknown value".into());
+                    }
+                }
+            } else if key == "until_id" {
+                until_id_raw = Some(val);
             } else if key.starts_with('#') && key.len() > 1 && key.len() < 4 && val.is_array() {
                 if ts.is_none() {
                     // Initialize the tag if necessary
@@ -181,6 +222,26 @@ impl<'de> Deserialize<'de> for ReqFilter {
             }
         }
         rf.tags = ts;
+        if let Some(v) = until_id_raw {
+            match v.as_str().filter(|s| is_lowercase_hex_64(s)) {
+                Some(s) if rf.order.is_some() && rf.until.is_some() => {
+                    rf.until_id = Some(s.to_owned());
+                }
+                Some(_) => {
+                    rf.force_no_match = true;
+                    if rf.extension_error.is_none() {
+                        rf.extension_error = Some("until_id: requires order and until".into());
+                    }
+                }
+                None => {
+                    rf.force_no_match = true;
+                    if rf.extension_error.is_none() {
+                        rf.extension_error =
+                            Some("until_id: must be a 64-character lowercase hex event id".into());
+                    }
+                }
+            }
+        }
         Ok(rf)
     }
 }
@@ -288,6 +349,10 @@ impl Subscription {
     }
 }
 
+fn is_lowercase_hex_64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn prefix_match(prefixes: &[String], target: &str) -> bool {
     for prefix in prefixes {
         if target.starts_with(prefix) {
@@ -346,9 +411,17 @@ impl ReqFilter {
     #[must_use]
     pub fn interested_in_event(&self, event: &Event) -> bool {
         //        self.id.as_ref().map(|v| v == &event.id).unwrap_or(true)
+        // with the order extension, since/until bound the publication
+        // axis.  until_id addresses stored-query resumption only and
+        // is deliberately ignored for live matching.
+        let event_time = if self.order.is_some() {
+            event.published_time()
+        } else {
+            event.created_at
+        };
         self.ids_match(event)
-            && self.since.map_or(true, |t| event.created_at >= t)
-            && self.until.map_or(true, |t| event.created_at <= t)
+            && self.since.map_or(true, |t| event_time >= t)
+            && self.until.map_or(true, |t| event_time <= t)
             && self.kind_match(event.kind)
             && (self.authors_match(event) || self.delegated_authors_match(event))
             && self.tag_match(event)
@@ -673,6 +746,152 @@ mod tests {
         } else {
             assert!(false, "filter could not be parsed");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn order_published_at_parses() -> Result<()> {
+        let s: Subscription =
+            serde_json::from_str(r#"["REQ","xyz",{"kinds":[1],"order":"published_at"}]"#)?;
+        let f = s.filters.first().unwrap();
+        assert_eq!(f.order, Some(Order::PublishedAt));
+        assert!(!f.force_no_match);
+        assert_eq!(f.extension_error, None);
+        Ok(())
+    }
+
+    #[test]
+    fn order_unknown_value_force_no_match() -> Result<()> {
+        let s: Subscription =
+            serde_json::from_str(r#"["REQ","xyz",{"kinds":[1],"order":"bogus"}]"#)?;
+        let f = s.filters.first().unwrap();
+        assert_eq!(f.order, None);
+        assert!(f.force_no_match);
+        assert!(f.extension_error.as_ref().unwrap().contains("order"));
+        Ok(())
+    }
+
+    #[test]
+    fn order_non_string_force_no_match() -> Result<()> {
+        let s: Subscription = serde_json::from_str(r#"["REQ","xyz",{"kinds":[1],"order":7}]"#)?;
+        let f = s.filters.first().unwrap();
+        assert!(f.force_no_match);
+        assert!(f.extension_error.as_ref().unwrap().contains("order"));
+        Ok(())
+    }
+
+    #[test]
+    fn until_id_valid_parses() -> Result<()> {
+        let id = "5f".repeat(32);
+        let raw = format!(
+            r#"["REQ","xyz",{{"kinds":[1],"order":"published_at","until":1000,"until_id":"{id}"}}]"#
+        );
+        let s: Subscription = serde_json::from_str(&raw)?;
+        let f = s.filters.first().unwrap();
+        assert_eq!(f.until_id, Some(id));
+        assert!(!f.force_no_match);
+        Ok(())
+    }
+
+    #[test]
+    fn until_id_without_order_force_no_match() -> Result<()> {
+        let id = "5f".repeat(32);
+        let raw = format!(r#"["REQ","xyz",{{"kinds":[1],"until":1000,"until_id":"{id}"}}]"#);
+        let s: Subscription = serde_json::from_str(&raw)?;
+        let f = s.filters.first().unwrap();
+        assert_eq!(f.until_id, None);
+        assert!(f.force_no_match);
+        assert!(f.extension_error.as_ref().unwrap().contains("until_id"));
+        Ok(())
+    }
+
+    #[test]
+    fn until_id_without_until_force_no_match() -> Result<()> {
+        let id = "5f".repeat(32);
+        let raw = format!(
+            r#"["REQ","xyz",{{"kinds":[1],"order":"published_at","until_id":"{id}"}}]"#
+        );
+        let s: Subscription = serde_json::from_str(&raw)?;
+        let f = s.filters.first().unwrap();
+        assert_eq!(f.until_id, None);
+        assert!(f.force_no_match);
+        assert!(f.extension_error.as_ref().unwrap().contains("until_id"));
+        Ok(())
+    }
+
+    #[test]
+    fn until_id_malformed_force_no_match() -> Result<()> {
+        for bad in [
+            r#""abc""#,                // too short
+            r#""5F5F""#,               // uppercase
+            r#"12345"#,                // not a string
+            &format!("\"{}\"", "zz".repeat(32)), // not hex
+        ] {
+            let raw = format!(
+                r#"["REQ","xyz",{{"kinds":[1],"order":"published_at","until":1000,"until_id":{bad}}}]"#
+            );
+            let s: Subscription = serde_json::from_str(&raw)?;
+            let f = s.filters.first().unwrap();
+            assert_eq!(f.until_id, None, "until_id {bad} should not parse");
+            assert!(f.force_no_match, "until_id {bad} should force no match");
+            assert!(f.extension_error.as_ref().unwrap().contains("until_id"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn order_serialize_round_trip() -> Result<()> {
+        let id = "5f".repeat(32);
+        let raw = format!(
+            r#"["REQ","xyz",{{"kinds":[1],"order":"published_at","until":1000,"until_id":"{id}"}}]"#
+        );
+        let s: Subscription = serde_json::from_str(&raw)?;
+        let serialized = serde_json::to_string(&s.filters.first())?;
+        let wrapped = format!(r#"["REQ","xyz",{serialized}]"#);
+        let parsed: Subscription = serde_json::from_str(&wrapped)?;
+        let pf = parsed.filters.first().unwrap();
+        assert_eq!(pf.order, Some(Order::PublishedAt));
+        assert_eq!(pf.until, Some(1000));
+        assert_eq!(pf.until_id, Some(id));
+        Ok(())
+    }
+
+    #[test]
+    fn stock_filter_serialization_has_no_extension_keys() -> Result<()> {
+        let s: Subscription =
+            serde_json::from_str(r#"["REQ","xyz",{"kinds":[1],"until":1000,"limit":10}]"#)?;
+        let serialized = serde_json::to_string(&s.filters.first())?;
+        assert!(!serialized.contains("order"));
+        assert!(!serialized.contains("until_id"));
+        Ok(())
+    }
+
+    #[test]
+    fn interest_order_publication_axis() -> Result<()> {
+        // published_at tag 500, created_at 1500: the order extension
+        // bounds against publication time, stock against created_at.
+        let e = Event {
+            id: "abc".to_owned(),
+            pubkey: "".to_owned(),
+            delegated_by: None,
+            created_at: 1500,
+            kind: 1,
+            tags: vec![vec!["published_at".to_owned(), "500".to_owned()]],
+            content: "".to_owned(),
+            sig: "".to_owned(),
+            tagidx: None,
+        };
+        let s_order: Subscription = serde_json::from_str(
+            r#"["REQ","xyz",{"kinds":[1],"until":1000,"order":"published_at"}]"#,
+        )?;
+        let s_stock: Subscription =
+            serde_json::from_str(r#"["REQ","xyz",{"kinds":[1],"until":1000}]"#)?;
+        assert!(s_order.interested_in_event(&e));
+        assert!(!s_stock.interested_in_event(&e));
+        let s_order_since: Subscription = serde_json::from_str(
+            r#"["REQ","xyz",{"kinds":[1],"since":1000,"order":"published_at"}]"#,
+        )?;
+        assert!(!s_order_since.interested_in_event(&e));
         Ok(())
     }
 

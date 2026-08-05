@@ -113,7 +113,11 @@ pub fn proto_filter_to_internal(pf: &relay_proto::Filter) -> ReqFilter {
         authors,
         limit,
         tags,
+        // the order extension is not exposed via the gRPC filter proto
+        order: None,
+        until_id: None,
         force_no_match: false,
+        extension_error: None,
     }
 }
 

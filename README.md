@@ -30,6 +30,33 @@ Upstream also provides the gRPC event admission interface (`nauthz.proto`) — a
 
 Everything below is buildtall.systems work on top of the upstream relay.
 
+### Publication-Order Filter Extension
+
+An opt-in REQ filter key orders results by publication time instead of `created_at`. The relay derives a `published_at` value for every stored event: the first `published_at` tag whose value parses as unix seconds, else `created_at`. The value is stored in a dedicated column, populated on insert and backfilled by schema migration 19.
+
+Two filter keys:
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `order` | the string `"published_at"` | `since`, `until`, `limit`, and result order operate on the publication axis |
+| `until_id` | 64-character lowercase hex event id | composite resume cursor paired with `until` for tie-safe paging |
+
+Example:
+
+```json
+["REQ", "river", {"kinds": [30023], "#t": ["drss"], "limit": 25, "order": "published_at"}]
+```
+
+Semantics:
+
+- With a limit, results order by `published_at` descending, event id ascending among ties. Without a limit, `published_at` ascending, event id descending.
+- With `until` and `until_id`, a result row must satisfy `published_at < until OR (published_at = until AND event_id > until_id)`. The cursor pair is the publication time and id of the last event of the previous page; the cursor event itself is excluded.
+- Live (post-EOSE) matching evaluates `since`/`until` against the publication time. `until_id` applies to stored-query resumption only and is ignored for live matching.
+
+Validation is strict. An unknown `order` value, or an `until_id` that is not 64-character lowercase hex or arrives without both `order` and `until`, matches nothing and the client receives a NOTICE naming the offending key. A filter without `order` behaves byte-identically to stock NIP-01.
+
+The extension is sqlite-only. On the postgres backend, order-extended filters match nothing and the relay logs a startup warning. The extension is not exposed through the gRPC filter proto and is not announced via NIP-11.
+
 ### gRPC Relay Service
 
 A tonic-based gRPC server exposes the full relay protocol for machine-to-machine communication. Defined in `proto/relay.proto` under the `nostr.relay.v1.Relay` service:

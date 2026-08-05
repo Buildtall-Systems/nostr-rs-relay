@@ -930,6 +930,11 @@ fn override_index(f: &ReqFilter) -> Option<String> {
     if f.ids.is_some() {
         return Some("event_hash_index".into());
     }
+    // order-extended filters query the publication axis; the
+    // created_at-oriented overrides below would misdirect the planner.
+    if f.order.is_some() {
+        return None;
+    }
     // queries for multiple kinds default to kind_index, which is
     // significantly slower than kind_created_at_index.
     if let Some(ks) = &f.kinds {
@@ -1043,13 +1048,16 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
             } else {
                 kind_clause = String::new();
             };
-            let since_clause = if f.since.is_some() {
+            // publication-axis bounds imply nothing about created_at,
+            // so the tag-subquery time pushdown only applies to stock
+            // filters.
+            let since_clause = if f.since.is_some() && f.order.is_none() {
                 format!("AND created_at >= {}", f.since.unwrap())
             } else {
                 String::new()
             };
             // Query for timestamp
-            let until_clause = if f.until.is_some() {
+            let until_clause = if f.until.is_some() && f.order.is_none() {
                 format!("AND created_at <= {}", f.until.unwrap())
             } else {
                 String::new()
@@ -1126,15 +1134,33 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
             }
         }
     }
-    // Query for timestamp
-    if f.since.is_some() {
-        let created_clause = format!("created_at >= {}", f.since.unwrap());
+    // Query for timestamp; the order extension moves both bounds to
+    // the publication axis.
+    if let Some(since) = f.since {
+        let created_clause = if f.order.is_some() {
+            format!("published_at >= {since}")
+        } else {
+            format!("created_at >= {since}")
+        };
         filter_components.push(created_clause);
     }
     // Query for timestamp
-    if f.until.is_some() {
-        let until_clause = format!("created_at <= {}", f.until.unwrap());
-        filter_components.push(until_clause);
+    if let Some(until) = f.until {
+        if f.order.is_some() {
+            if let Some(until_id) = &f.until_id {
+                // composite resume cursor: strictly after the
+                // (published_at, event_hash) pair in the
+                // (published_at DESC, event_hash ASC) page order
+                filter_components.push(format!(
+                    "(published_at < {until} OR (published_at = {until} AND event_hash > ?))"
+                ));
+                params.push(Box::new(hex::decode(until_id).ok()));
+            } else {
+                filter_components.push(format!("published_at <= {until}"));
+            }
+        } else {
+            filter_components.push(format!("created_at <= {until}"));
+        }
     }
     // never display hidden events
     query.push_str(" WHERE hidden!=TRUE");
@@ -1148,8 +1174,19 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
     }
     // Apply per-filter limit to this subquery.
     // The use of a LIMIT implies a DESC order, to capture only the most recent events.
+    // The order extension adds event_hash as a deterministic tie-break,
+    // inverted with the direction so page order is globally consistent.
     if let Some(lim) = f.limit {
-        let _ = write!(query, " ORDER BY e.created_at DESC LIMIT {lim}");
+        if f.order.is_some() {
+            let _ = write!(
+                query,
+                " ORDER BY e.published_at DESC, e.event_hash ASC LIMIT {lim}"
+            );
+        } else {
+            let _ = write!(query, " ORDER BY e.created_at DESC LIMIT {lim}");
+        }
+    } else if f.order.is_some() {
+        query.push_str(" ORDER BY e.published_at ASC, e.event_hash DESC");
     } else {
         query.push_str(" ORDER BY e.created_at ASC");
     }
@@ -1414,7 +1451,7 @@ fn _pool_at_capacity(pool: &SqlitePool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subscription::TagOperand;
+    use crate::subscription::{Order, TagOperand};
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -1432,7 +1469,10 @@ mod tests {
                 'd',
                 TagOperand::Or(HashSet::from(["test".to_owned()])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let (query, _params, _idx) = query_from_filter(&filter);
@@ -1455,7 +1495,10 @@ mod tests {
                 'd',
                 TagOperand::Or(HashSet::from(["test".to_owned(), "test2".to_owned()])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let (query, _params, _idx) = query_from_filter(&filter);
@@ -1481,7 +1524,10 @@ mod tests {
                 'd',
                 TagOperand::And(HashSet::from(["test".to_owned(), "test2".to_owned()])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let (query, _params, _idx) = query_from_filter(&filter);
@@ -1519,7 +1565,10 @@ mod tests {
                     "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
                 ])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let (query, _params, _idx) = query_from_filter(&filter);
@@ -1548,7 +1597,10 @@ mod tests {
             authors: None,
             limit: None,
             tags: Some(HashMap::from([('a', TagOperand::And(HashSet::new()))])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let (query, _params, _idx) = query_from_filter(&filter);
@@ -1573,7 +1625,10 @@ mod tests {
                 'd',
                 TagOperand::Or(HashSet::from(["test".to_owned()])),
             )])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let (query, _params, _idx) = query_from_filter(&filter);
@@ -1598,7 +1653,10 @@ mod tests {
                 ('d', TagOperand::Or(HashSet::from(["test".to_owned()]))),
                 ('e', TagOperand::Or(HashSet::from(["event1".to_owned()]))),
             ])),
+            order: None,
+            until_id: None,
             force_no_match: false,
+            extension_error: None,
         };
 
         let (query, _params, _idx) = query_from_filter(&filter);
@@ -1610,5 +1668,145 @@ mod tests {
             subquery_count, 2,
             "Should have 2 subqueries for 2 different tag keys"
         );
+    }
+
+    #[test]
+    fn test_query_order_with_tag_and_limit() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![30_023]),
+            since: None,
+            until: None,
+            authors: None,
+            limit: Some(25),
+            tags: Some(HashMap::from([(
+                't',
+                TagOperand::Or(HashSet::from(["drss".to_owned()])),
+            )])),
+            order: Some(Order::PublishedAt),
+            until_id: None,
+            force_no_match: false,
+            extension_error: None,
+        };
+
+        let (query, _params, idx) = query_from_filter(&filter);
+        assert_eq!(idx, None, "order filters must not override the index");
+        assert_eq!(
+            query,
+            "SELECT e.content FROM event e  WHERE hidden!=TRUE AND kind IN (30023) AND e.id IN (SELECT t.event_id FROM tag t WHERE (name=? AND value IN (?) AND kind IN (30023))) AND (expires_at IS NULL OR expires_at > ?) ORDER BY e.published_at DESC, e.event_hash ASC LIMIT 25"
+        );
+    }
+
+    #[test]
+    fn test_query_order_since_until_no_limit() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![30_023]),
+            since: Some(100),
+            until: Some(200),
+            authors: None,
+            limit: None,
+            tags: None,
+            order: Some(Order::PublishedAt),
+            until_id: None,
+            force_no_match: false,
+            extension_error: None,
+        };
+
+        let (query, _params, _idx) = query_from_filter(&filter);
+        assert_eq!(
+            query,
+            "SELECT e.content FROM event e  WHERE hidden!=TRUE AND kind IN (30023) AND published_at >= 100 AND published_at <= 200 AND (expires_at IS NULL OR expires_at > ?) ORDER BY e.published_at ASC, e.event_hash DESC"
+        );
+    }
+
+    #[test]
+    fn test_query_order_until_id_cursor() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![30_023]),
+            since: None,
+            until: Some(1_700_000_000),
+            authors: None,
+            limit: Some(25),
+            tags: None,
+            order: Some(Order::PublishedAt),
+            until_id: Some("5f".repeat(32)),
+            force_no_match: false,
+            extension_error: None,
+        };
+
+        let (query, params, _idx) = query_from_filter(&filter);
+        assert_eq!(
+            query,
+            "SELECT e.content FROM event e  WHERE hidden!=TRUE AND kind IN (30023) AND (published_at < 1700000000 OR (published_at = 1700000000 AND event_hash > ?)) AND (expires_at IS NULL OR expires_at > ?) ORDER BY e.published_at DESC, e.event_hash ASC LIMIT 25"
+        );
+        // the event_hash cursor and the expiration timestamp
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_query_order_skips_tag_time_pushdown() {
+        let filter = ReqFilter {
+            ids: None,
+            kinds: Some(vec![1000]),
+            since: Some(1_234_567_890),
+            until: Some(9_876_543_210),
+            authors: None,
+            limit: None,
+            tags: Some(HashMap::from([(
+                'd',
+                TagOperand::Or(HashSet::from(["test".to_owned()])),
+            )])),
+            order: Some(Order::PublishedAt),
+            until_id: None,
+            force_no_match: false,
+            extension_error: None,
+        };
+
+        let (query, _params, _idx) = query_from_filter(&filter);
+        // publication bounds imply nothing about created_at, so the
+        // tag subquery must not carry the created_at pushdown.
+        assert!(!query.contains("created_at"));
+        assert_eq!(
+            query,
+            "SELECT e.content FROM event e  WHERE hidden!=TRUE AND kind IN (1000) AND e.id IN (SELECT t.event_id FROM tag t WHERE (name=? AND value IN (?) AND kind IN (1000))) AND published_at >= 1234567890 AND published_at <= 9876543210 AND (expires_at IS NULL OR expires_at > ?) ORDER BY e.published_at ASC, e.event_hash DESC"
+        );
+    }
+
+    #[test]
+    fn test_query_order_index_standdown() {
+        let author =
+            "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned();
+        let stock = ReqFilter {
+            ids: None,
+            kinds: None,
+            since: None,
+            until: None,
+            authors: Some(vec![author.clone()]),
+            limit: Some(10),
+            tags: None,
+            order: None,
+            until_id: None,
+            force_no_match: false,
+            extension_error: None,
+        };
+        let ordered = ReqFilter {
+            order: Some(Order::PublishedAt),
+            ..stock.clone()
+        };
+        let with_ids = ReqFilter {
+            ids: Some(vec![
+                "63fe6318dc58583cfe16810f86dd09e18bfd76aabc24a0081ce2856f330504ed".to_owned(),
+            ]),
+            ..ordered.clone()
+        };
+
+        let (_query, _params, stock_idx) = query_from_filter(&stock);
+        assert_eq!(stock_idx, Some("author_created_at_index".to_owned()));
+        let (_query, _params, order_idx) = query_from_filter(&ordered);
+        assert_eq!(order_idx, None);
+        let (_query, _params, ids_idx) = query_from_filter(&with_ids);
+        assert_eq!(ids_idx, Some("event_hash_index".to_owned()));
     }
 }

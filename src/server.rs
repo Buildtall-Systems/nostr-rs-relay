@@ -1485,6 +1485,16 @@ async fn nostr_server(
                             if let Some(ref lim) = sub_lim_opt {
                                 lim.until_ready_with_jitter(jitter).await;
                             }
+                            // filters force-no-matched by extension validation return
+                            // nothing; tell the client why instead of serving silence.
+                            if let Some(msg) = s.filters.iter().find_map(|f| f.extension_error.clone()) {
+                                info!("subscription filter failed extension validation: {} (cid: {}, sub: {:?})", msg, cid, s.id);
+                                if ws_stream.send(make_notice_message(&Notice::message(format!("invalid filter: {msg}")))).await.is_err() {
+                                    debug!("failed to send notice, closing connection (cid: {})", cid);
+                                    metrics.disconnects.with_label_values(&["send_error"]).inc();
+                                    break;
+                                }
+                            }
                             if settings.limits.limit_scrapers && s.is_scraper() {
                                 info!("subscription was scraper, ignoring (cid: {}, sub: {:?})", cid, s.id);
                                 if ws_stream.send(Message::Text(format!("[\"EOSE\",\"{}\"]", s.id))).await.is_err() {

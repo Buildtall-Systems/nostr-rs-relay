@@ -14,6 +14,11 @@ use std::ops::Deref;
 pub struct Subscription {
     pub id: String,
     pub filters: Vec<ReqFilter>,
+    /// True when this arrived as a NIP-45 COUNT message: the query is
+    /// one-shot and answers with an aggregate count, never an event
+    /// stream, and the id is never registered for live matching.
+    #[serde(skip)]
+    pub count: bool,
 }
 
 /// Tag query is AND or OR operation
@@ -274,9 +279,10 @@ impl<'de> Deserialize<'de> for Subscription {
         let req = req_cmd_str
             .as_str()
             .ok_or_else(|| serde::de::Error::custom("first element of request was not a string"))?;
-        if req != "REQ" {
-            return Err(serde::de::Error::custom("missing REQ command"));
+        if req != "REQ" && req != "COUNT" {
+            return Err(serde::de::Error::custom("missing REQ or COUNT command"));
         }
+        let is_count = req == "COUNT";
 
         // ensure sub id is a string
         let sub_id_str: serde_json::Value = i.next().unwrap().take();
@@ -295,6 +301,7 @@ impl<'de> Deserialize<'de> for Subscription {
         Ok(Subscription {
             id: sub_id.to_owned(),
             filters,
+            count: is_count,
         })
     }
 }
@@ -447,6 +454,24 @@ mod tests {
     fn incorrect_header() {
         let raw_json = "[\"REQUEST\",\"some-id\",\"{}\"]";
         assert!(serde_json::from_str::<Subscription>(raw_json).is_err());
+    }
+
+    #[test]
+    fn count_request_parse() -> Result<()> {
+        let raw_json = "[\"COUNT\",\"some-id\",{\"kinds\":[1]}]";
+        let s: Subscription = serde_json::from_str(raw_json)?;
+        assert_eq!(s.id, "some-id");
+        assert!(s.count);
+        assert_eq!(s.filters.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn req_request_is_not_count() -> Result<()> {
+        let raw_json = "[\"REQ\",\"some-id\",{}]";
+        let s: Subscription = serde_json::from_str(raw_json)?;
+        assert!(!s.count);
+        Ok(())
     }
 
     #[test]

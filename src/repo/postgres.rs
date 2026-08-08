@@ -419,6 +419,7 @@ ON CONFLICT (id) DO NOTHING"#,
                     .send(QueryResult {
                         sub_id: sub.get_id(),
                         event: String::from_utf8(event_json).unwrap(),
+                        count: None,
                     })
                     .await
                     .ok();
@@ -429,6 +430,7 @@ ON CONFLICT (id) DO NOTHING"#,
             .send(QueryResult {
                 sub_id: sub.get_id(),
                 event: "EOSE".to_string(),
+                count: None,
             })
             .await
             .ok();
@@ -444,6 +446,20 @@ ON CONFLICT (id) DO NOTHING"#,
             row_count
         );
         Ok(())
+    }
+
+    /// NIP-45 counting is sqlite-only, like the order filter extension;
+    /// the caller answers the client with CLOSED.
+    async fn count_subscription(
+        &self,
+        _sub: Subscription,
+        _client_id: String,
+        _query_tx: tokio::sync::mpsc::Sender<QueryResult>,
+        _abandon_query_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
+        Err(error::Error::CustomError(
+            "NIP-45 COUNT is not implemented for the postgres backend".into(),
+        ))
     }
 
     async fn optimize_db(&self) -> Result<()> {

@@ -485,4 +485,7 @@ pub struct QueryResult {
     pub sub_id: String,
     /// Serialized event
     pub event: String,
+    /// NIP-45 aggregate; present only for COUNT queries, in which case
+    /// `event` is empty and the result is terminal for the query id.
+    pub count: Option<u64>,
 }

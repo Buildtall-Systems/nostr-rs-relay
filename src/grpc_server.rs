@@ -160,6 +160,7 @@ impl Relay for RelayService {
         let subscription = Subscription {
             id: sub_id.clone(),
             filters,
+            count: false,
         };
 
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -441,6 +442,7 @@ impl Relay for RelayService {
         let subscription = Subscription {
             id: "grpc-query".to_string(),
             filters,
+            count: false,
         };
 
         let query_buffer = self.settings.limits.event_persist_buffer;

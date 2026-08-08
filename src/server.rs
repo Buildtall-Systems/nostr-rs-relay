@@ -1260,7 +1260,14 @@ async fn nostr_server(
             Some(query_result) = query_rx.recv() => {
                 // database informed us of a query result we asked for
                 let subesc = query_result.sub_id.replace('"', "");
-                if query_result.event == "EOSE" {
+                if let Some(count) = query_result.count {
+                    let send_str = format!("[\"COUNT\",\"{subesc}\",{{\"count\":{count}}}]");
+                    if ws_stream.send(Message::Text(send_str)).await.is_err() {
+                        debug!("failed to send message, closing connection (cid: {})", cid);
+                        metrics.disconnects.with_label_values(&["send_error"]).inc();
+                        break;
+                    }
+                } else if query_result.event == "EOSE" {
                     let send_str = format!("[\"EOSE\",\"{subesc}\"]");
                     if ws_stream.send(Message::Text(send_str)).await.is_err() {
                         debug!("failed to send message, closing connection (cid: {})", cid);
@@ -1467,6 +1474,45 @@ async fn nostr_server(
                                     metrics.disconnects.with_label_values(&["send_error"]).inc();
                                     break;
                                 }
+                            }
+                        }
+                    },
+                    Ok(NostrMessage::SubMsg(s)) if s.count => {
+                        // NIP-45 COUNT: one-shot, never registered for live
+                        // matching, so max_subs accounting is untouched. Any
+                        // refusal answers CLOSED, per the NIP.
+                        debug!("count requested (cid: {}, sub: {:?})", cid, s.id);
+                        metrics.cmd_req.inc();
+                        if let Some(ref lim) = sub_lim_opt {
+                            lim.until_ready_with_jitter(jitter).await;
+                        }
+                        let refusal = if let Some(msg) = s.filters.iter().find_map(|f| f.extension_error.clone()) {
+                            Some(format!("invalid: {msg}"))
+                        } else if settings.limits.limit_scrapers && s.is_scraper() {
+                            Some("blocked: count too broad".to_string())
+                        } else {
+                            None
+                        };
+                        if let Some(reason) = refusal {
+                            info!("count refused: {} (cid: {}, sub: {:?})", reason, cid, s.id);
+                            if ws_stream.send(Message::Text(json!(["CLOSED", s.id, reason]).to_string())).await.is_err() {
+                                debug!("failed to send message, closing connection (cid: {})", cid);
+                                metrics.disconnects.with_label_values(&["send_error"]).inc();
+                                break;
+                            }
+                            continue
+                        }
+                        let (abandon_query_tx, abandon_query_rx) = oneshot::channel::<()>();
+                        // a CLOSE for this id cancels the running count.
+                        if let Some(previous_query) = running_queries.insert(s.id.clone(), abandon_query_tx) {
+                            previous_query.send(()).ok();
+                        }
+                        if repo.count_subscription(s.clone(), cid.clone(), query_tx.clone(), abandon_query_rx).await.is_err() {
+                            info!("count unsupported by backend (cid: {}, sub: {:?})", cid, s.id);
+                            if ws_stream.send(Message::Text(json!(["CLOSED", s.id, "unsupported: COUNT is not available on this relay"]).to_string())).await.is_err() {
+                                debug!("failed to send message, closing connection (cid: {})", cid);
+                                metrics.disconnects.with_label_values(&["send_error"]).inc();
+                                break;
                             }
                         }
                     },

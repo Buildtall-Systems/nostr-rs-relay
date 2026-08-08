@@ -39,6 +39,20 @@ pub trait NostrRepo: Send + Sync {
         mut abandon_query_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<()>;
 
+    /// Perform a NIP-45 count query using a subscription.
+    ///
+    /// One-shot: a single [`QueryResult`] carrying the aggregate in
+    /// `count` is published on `query_tx`. An `Err` return means the
+    /// backend does not support counting and the caller must answer
+    /// the client with CLOSED.
+    async fn count_subscription(
+        &self,
+        sub: Subscription,
+        client_id: String,
+        query_tx: tokio::sync::mpsc::Sender<QueryResult>,
+        abandon_query_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()>;
+
     /// Perform normal maintenance
     async fn optimize_db(&self) -> Result<()>;
 

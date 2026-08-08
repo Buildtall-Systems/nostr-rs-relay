@@ -498,6 +498,7 @@ impl NostrRepo for SqliteRepo {
                             .blocking_send(QueryResult {
                                 sub_id: sub.get_id(),
                                 event: event_json,
+                                count: None,
                             })
                             .ok();
                         last_successful_send = Instant::now();
@@ -532,8 +533,87 @@ impl NostrRepo for SqliteRepo {
                 .blocking_send(QueryResult {
                     sub_id: sub.get_id(),
                     event: "EOSE".to_string(),
+                    count: None,
                 })
                 .ok();
+            metrics
+                .query_sub
+                .observe(pre_spawn_start.elapsed().as_secs_f64());
+            let ok: Result<()> = Ok(());
+            ok
+        });
+        Ok(())
+    }
+
+    /// Perform a NIP-45 count query using a subscription.
+    ///
+    /// One-shot: the aggregate arrives as a single [`QueryResult`] with
+    /// `count` set. The count runs on the same reader pool, behind the
+    /// same checkpoint and load-shedding gates as an event query.
+    async fn count_subscription(
+        &self,
+        sub: Subscription,
+        client_id: String,
+        query_tx: tokio::sync::mpsc::Sender<QueryResult>,
+        mut abandon_query_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
+        let pre_spawn_start = Instant::now();
+        let sem = self
+            .reader_threads_ready
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        let self = self.clone();
+        let metrics = self.metrics.clone();
+        task::spawn_blocking(move || {
+            {
+                // if we are waiting on a checkpoint, stop until it is complete
+                let _x = self.checkpoint_in_progress.blocking_lock();
+            }
+            let db_queue_time = pre_spawn_start.elapsed();
+            // if the queue time was very long (>5 seconds), spare the DB and abort.
+            if db_queue_time > Duration::from_secs(5) {
+                info!(
+                    "shedding DB count load queued for {:?} (cid: {}, sub: {:?})",
+                    db_queue_time, client_id, sub.id
+                );
+                metrics.query_aborts.with_label_values(&["loadshed"]).inc();
+                return Ok(());
+            }
+            // check before getting a DB connection if the client still wants the result
+            if abandon_query_rx.try_recv().is_ok() {
+                debug!(
+                    "count cancelled by client (before execution) (cid: {}, sub: {:?})",
+                    client_id, sub.id
+                );
+                return Ok(());
+            }
+            let start = Instant::now();
+            if let Ok(mut conn) = self.read_pool.get() {
+                let (q, p) = count_query_from_sub(&sub);
+                conn.trace(Some(|x| trace!("SQL trace: {:?}", x)));
+                let mut stmt = conn.prepare_cached(&q)?;
+                let count: u64 =
+                    stmt.query_row(rusqlite::params_from_iter(p), |row| row.get(0))?;
+                debug!(
+                    "count completed in {:?} (cid: {}, sub: {:?}, count: {})",
+                    start.elapsed(),
+                    client_id,
+                    sub.id,
+                    count
+                );
+                query_tx
+                    .blocking_send(QueryResult {
+                        sub_id: sub.get_id(),
+                        event: String::new(),
+                        count: Some(count),
+                    })
+                    .ok();
+            } else {
+                warn!("Could not get a database connection for counting");
+            }
+            drop(sem); // new query can begin
             metrics
                 .query_sub
                 .observe(pre_spawn_start.elapsed().as_secs_f64());
@@ -1193,6 +1273,25 @@ fn query_from_filter(f: &ReqFilter) -> (String, Vec<Box<dyn ToSql>>, Option<Stri
     (query, params, idx_name)
 }
 
+/// Create a NIP-45 count query and params from a subscription.
+///
+/// Each filter's event query becomes a bounded subquery, so a filter
+/// limit caps that filter's contribution. Multiple filters dedupe
+/// through UNION on the serialized event before the aggregate: an
+/// event matching two filters counts once, per the NIP's "aggregated
+/// into a single count result".
+fn count_query_from_sub(sub: &Subscription) -> (String, Vec<Box<dyn ToSql>>) {
+    let mut members: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn ToSql>> = vec![];
+    for f in &sub.filters {
+        let (f_query, mut f_params, _idx) = query_from_filter(f);
+        members.push(format!("SELECT content FROM ({f_query})"));
+        params.append(&mut f_params);
+    }
+    let query = format!("SELECT COUNT(*) FROM ({})", members.join(" UNION "));
+    (query, params)
+}
+
 /// Create a dynamic SQL query string and params from a subscription.
 fn _query_from_sub(sub: &Subscription) -> (String, Vec<Box<dyn ToSql>>, Vec<String>) {
     // build a dynamic SQL query for an entire subscription, based on
@@ -1453,6 +1552,68 @@ mod tests {
     use super::*;
     use crate::subscription::{Order, TagOperand};
     use std::collections::{HashMap, HashSet};
+
+    fn plain_filter(kinds: Option<Vec<u64>>, authors: Option<Vec<String>>, limit: Option<u64>) -> ReqFilter {
+        ReqFilter {
+            ids: None,
+            kinds,
+            since: None,
+            until: None,
+            authors,
+            limit,
+            tags: None,
+            order: None,
+            until_id: None,
+            force_no_match: false,
+            extension_error: None,
+        }
+    }
+
+    #[test]
+    fn test_count_query_wraps_filter_query() {
+        let filter = plain_filter(Some(vec![1]), None, None);
+        let (inner, _p, _i) = query_from_filter(&filter);
+        let sub = Subscription {
+            id: "c".to_owned(),
+            filters: vec![filter],
+            count: true,
+        };
+        let (query, _params) = count_query_from_sub(&sub);
+        assert_eq!(query, format!("SELECT COUNT(*) FROM (SELECT content FROM ({inner}))"));
+    }
+
+    #[test]
+    fn test_count_query_bounded_by_limit() {
+        let filter = plain_filter(Some(vec![1]), None, Some(5));
+        let sub = Subscription {
+            id: "c".to_owned(),
+            filters: vec![filter],
+            count: true,
+        };
+        let (query, _params) = count_query_from_sub(&sub);
+        assert!(query.starts_with("SELECT COUNT(*) FROM ("));
+        assert!(query.contains("LIMIT 5"));
+    }
+
+    #[test]
+    fn test_count_query_unions_filters() {
+        let fa = plain_filter(None, Some(vec![
+            "84de35e2584d2b144aae823c9ed0b0f3deda09648530b93d1a2a146d1dea9864".to_owned(),
+        ]), None);
+        let fb = plain_filter(Some(vec![1]), None, None);
+        let (ia, _pa, _xa) = query_from_filter(&fa);
+        let (ib, _pb, _xb) = query_from_filter(&fb);
+        let sub = Subscription {
+            id: "c".to_owned(),
+            filters: vec![fa, fb],
+            count: true,
+        };
+        let (query, _params) = count_query_from_sub(&sub);
+        assert_eq!(
+            query,
+            format!("SELECT COUNT(*) FROM (SELECT content FROM ({ia}) UNION SELECT content FROM ({ib}))")
+        );
+    }
 
     #[test]
     fn test_query_gen_tag_value_or() {

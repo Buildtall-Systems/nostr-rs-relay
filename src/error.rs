@@ -66,6 +66,8 @@ pub enum Error {
     ChannelClosed,
     #[error("Authz error")]
     AuthzError,
+    #[error("Authz deadline exceeded")]
+    AuthzTimeout,
     #[error("Tonic GRPC error")]
     TonicError(tonic::Status),
     #[error("Invalid AUTH message")]

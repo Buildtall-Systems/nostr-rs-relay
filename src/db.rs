@@ -137,7 +137,8 @@ pub async fn db_writer(
     // create a client if GRPC is enabled.
     // Check with externalized event admitter service, if one is defined.
     let mut grpc_client = if let Some(svr) = settings.grpc.event_admission_server {
-        Some(nauthz::EventAuthzService::connect(&svr).await)
+        let timeout = Duration::from_secs(settings.grpc.event_admission_timeout_seconds);
+        Some(nauthz::EventAuthzService::connect(&svr, timeout).await)
     } else {
         None
     };
@@ -354,37 +355,22 @@ pub async fn db_writer(
                     subm_event.auth_pubkey,
                 )
                 .await;
-            match decision_res {
-                Ok(decision) => {
-                    if !decision.permitted() {
-                        // GPRC returned a decision to reject this event
-                        info!(
-                            "GRPC rejected event: {:?} (kind: {}) from: {:?} in: {:?} (IP: {:?})",
-                            event.get_event_id_prefix(),
-                            event.kind,
-                            event.get_author_prefix(),
-                            grpc_start.elapsed(),
-                            subm_event.source_ip
-                        );
-                        let msg = decision.message().unwrap_or_default();
-                        if msg.starts_with("auth-required:") {
-                            notice_tx
-                                .try_send(Notice::auth_required(event.id, &msg))
-                                .ok();
-                        } else {
-                            notice_tx
-                                .try_send(Notice::blocked(
-                                    event.id,
-                                    &msg,
-                                ))
-                                .ok();
-                        }
-                        continue;
-                    }
+            // Fail closed: only a permit lets the event through. A deny, an
+            // unreachable server, or an expired deadline all reject it.
+            if let Some(notice) = nauthz::rejection(&event.id, &decision_res) {
+                if let Err(e) = &decision_res {
+                    warn!("GRPC server error, rejecting event: {:?}", e);
                 }
-                Err(e) => {
-                    warn!("GRPC server error: {:?}", e);
-                }
+                info!(
+                    "GRPC rejected event: {:?} (kind: {}) from: {:?} in: {:?} (IP: {:?})",
+                    event.get_event_id_prefix(),
+                    event.kind,
+                    event.get_author_prefix(),
+                    grpc_start.elapsed(),
+                    subm_event.source_ip
+                );
+                notice_tx.try_send(notice).ok();
+                continue;
             }
         }
 

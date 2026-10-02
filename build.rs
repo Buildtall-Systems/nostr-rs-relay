@@ -1,7 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Existing: authorization client only
+    // Authorization: the client, and the server for in-process test servers
     tonic_build::configure()
-        .build_server(false)
+        .build_server(true)
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile(&["proto/nauthz.proto"], &["proto"])?;
     // Relay service: both client and server

@@ -109,4 +109,98 @@ impl Notice {
             status: EventResultStatus::AuthRequired,
         })
     }
+
+    /// A rejection whose text comes from the event admission service. Text
+    /// that already carries a NIP-01 machine-readable prefix is kept verbatim;
+    /// other text is prefixed `blocked: `. An admission denial never stores
+    /// the event, so every status here answers OK false, `duplicate:` and
+    /// `pow:` included.
+    #[must_use]
+    pub fn admission_denied(id: String, msg: &str) -> Notice {
+        if msg.starts_with("auth-required:") {
+            return Notice::auth_required(id, msg);
+        }
+        for (prefix, status) in ADMISSION_PREFIXES {
+            if msg.starts_with(prefix) {
+                return Notice::EventResult(EventResult {
+                    id,
+                    msg: msg.to_string(),
+                    status,
+                });
+            }
+        }
+        Notice::blocked(id, msg)
+    }
+}
+
+/// NIP-01 machine-readable prefixes passed through from an admission denial,
+/// each with the rejecting status it reports.
+const ADMISSION_PREFIXES: [(&str, EventResultStatus); 7] = [
+    ("blocked:", EventResultStatus::Blocked),
+    ("restricted:", EventResultStatus::Restricted),
+    ("invalid:", EventResultStatus::Invalid),
+    ("pow:", EventResultStatus::Blocked),
+    ("duplicate:", EventResultStatus::Blocked),
+    ("rate-limited:", EventResultStatus::RateLimited),
+    ("error:", EventResultStatus::Error),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result_of(notice: Notice) -> EventResult {
+        match notice {
+            Notice::EventResult(res) => res,
+            _ => panic!("expected an event result"),
+        }
+    }
+
+    #[test]
+    fn admission_denied_keeps_prefixed_text() {
+        for (prefix, _) in ADMISSION_PREFIXES {
+            let msg = format!("{prefix} reason");
+            let res = result_of(Notice::admission_denied("id".into(), &msg));
+            assert_eq!(res.msg, msg);
+            assert!(!res.status.to_bool(), "{prefix} must answer OK false");
+        }
+    }
+
+    #[test]
+    fn admission_denied_maps_statuses() {
+        let res = result_of(Notice::admission_denied(
+            "id".into(),
+            "restricted: not ranked",
+        ));
+        assert!(matches!(res.status, EventResultStatus::Restricted));
+        let res = result_of(Notice::admission_denied("id".into(), "error: down"));
+        assert!(matches!(res.status, EventResultStatus::Error));
+        let res = result_of(Notice::admission_denied(
+            "id".into(),
+            "rate-limited: slow down",
+        ));
+        assert!(matches!(res.status, EventResultStatus::RateLimited));
+    }
+
+    #[test]
+    fn admission_denied_prefixes_plain_text() {
+        let res = result_of(Notice::admission_denied("id".into(), "not allowed"));
+        assert_eq!(res.msg, "blocked: not allowed");
+        assert!(matches!(res.status, EventResultStatus::Blocked));
+    }
+
+    #[test]
+    fn admission_denied_prefixes_empty_text() {
+        let res = result_of(Notice::admission_denied("id".into(), ""));
+        assert_eq!(res.msg, "blocked: ");
+        assert!(!res.status.to_bool());
+    }
+
+    #[test]
+    fn admission_denied_keeps_auth_required() {
+        let msg = "auth-required: NIP-42 authentication required";
+        let res = result_of(Notice::admission_denied("id".into(), msg));
+        assert_eq!(res.msg, msg);
+        assert!(matches!(res.status, EventResultStatus::AuthRequired));
+    }
 }

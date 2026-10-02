@@ -35,7 +35,16 @@ pub struct Grpc {
     pub event_admission_server: Option<String>,
     pub restricts_write: bool,
     pub relay_server_address: Option<String>,
+    /// Deadline for connecting to the event admission server and for each
+    /// admission call. An event whose admission does not finish within it is
+    /// rejected.
+    pub event_admission_timeout_seconds: u64,
 }
+
+/// Default deadline for one event admission, connect plus call. It exceeds
+/// the time an admission server may hold a decision while it loads its
+/// authorization state.
+pub const DEFAULT_EVENT_ADMISSION_TIMEOUT_SECONDS: u64 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(unused)]
@@ -304,6 +313,7 @@ impl Default for Settings {
                 event_admission_server: None,
                 restricts_write: false,
                 relay_server_address: None,
+                event_admission_timeout_seconds: DEFAULT_EVENT_ADMISSION_TIMEOUT_SECONDS,
             },
             network: Network {
                 port: 8080,

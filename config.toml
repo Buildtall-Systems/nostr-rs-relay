@@ -73,10 +73,16 @@ description = "A newly created nostr-rs-relay.\n\nCustomize this with your own i
 # functionality.
 #
 # Events can be authorized through an external service, by providing
-# the URL below.  In the event the server is not accessible, events
-# will be permitted.  The protobuf3 schema used is available in
-# `proto/nauthz.proto`.
+# the URL below.  Only an event the server permits is stored.  When the
+# server is not accessible, or does not answer within the deadline
+# below, the event is rejected with an "error:" message.  The protobuf3
+# schema used is available in `proto/nauthz.proto`.
 event_admission_server = "http://[::1]:50051"
+
+# Deadline in seconds for connecting to the event admission server and
+# for each admission call.  One writer task stores events for the
+# whole relay, so an admission call holds every write until it ends.
+#event_admission_timeout_seconds = 15
 
 # If the event admission server denies writes
 # in any case (excluding spam filtering).

@@ -790,6 +790,20 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
         error!("Database directory does not exist");
         return Err(Error::DatabaseDirError);
     }
+    if settings.authorization.author_only_reads {
+        if !settings.authorization.nip42_auth {
+            error!("author_only_reads requires nip42_auth");
+            return Err(Error::CustomError(
+                "author_only_reads requires nip42_auth".to_owned(),
+            ));
+        }
+        if settings.info.relay_url.is_none() {
+            error!("author_only_reads requires info.relay_url");
+            return Err(Error::CustomError(
+                "author_only_reads requires info.relay_url".to_owned(),
+            ));
+        }
+    }
     let addr = format!(
         "{}:{}",
         settings.network.address.trim(),
@@ -802,6 +816,9 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
             "Event publishing restricted to {} pubkey(s)",
             addr_whitelist.len()
         );
+    }
+    if settings.authorization.author_only_reads {
+        info!("Reads restricted to each authenticated client's own events");
     }
     // check if NIP-05 enforced user verification is on
     if settings.verified_users.is_active() {
@@ -1112,25 +1129,51 @@ fn make_notice_message(notice: &Notice) -> Message {
 }
 
 fn allowed_to_send(event_str: &str, conn: &conn::ClientConn, settings: &Settings) -> bool {
+    let authz = &settings.authorization;
+    if !authz.nip42_dms && !authz.author_only_reads {
+        return true;
+    }
     // TODO: pass in kind so that we can avoid deserialization for most events
-    if settings.authorization.nip42_dms {
-        match serde_json::from_str::<Event>(event_str) {
-            Ok(event) => {
-                if event.kind == 4 || event.kind == 44 || event.kind == 1059 {
-                    match (conn.auth_pubkey(), event.tag_values_by_name("p").first()) {
-                        (Some(auth_pubkey), Some(recipient_pubkey)) => {
-                            recipient_pubkey == auth_pubkey || &event.pubkey == auth_pubkey
-                        }
-                        (_, _) => false,
-                    }
-                } else {
-                    true
-                }
+    let event = match serde_json::from_str::<Event>(event_str) {
+        Ok(event) => event,
+        Err(_) => return false,
+    };
+    // author-only reads: never send another author's event, whatever
+    // the filter matched (delegated events included).
+    if authz.author_only_reads && conn.auth_pubkey() != Some(&event.pubkey) {
+        return false;
+    }
+    if authz.nip42_dms && (event.kind == 4 || event.kind == 44 || event.kind == 1059) {
+        return match (conn.auth_pubkey(), event.tag_values_by_name("p").first()) {
+            (Some(auth_pubkey), Some(recipient_pubkey)) => {
+                recipient_pubkey == auth_pubkey || &event.pubkey == auth_pubkey
             }
-            Err(_) => false,
+            (_, _) => false,
+        };
+    }
+    true
+}
+
+/// Apply author-only reads to a subscription before it is queried or
+/// registered. Returns the CLOSED reason when the client has not
+/// authenticated; otherwise narrows every filter to the client's own
+/// events.
+fn restrict_reads(
+    sub: &mut Subscription,
+    conn: &conn::ClientConn,
+    settings: &Settings,
+) -> Option<String> {
+    if !settings.authorization.author_only_reads {
+        return None;
+    }
+    match conn.auth_pubkey() {
+        Some(author) => {
+            sub.restrict_to_author(author);
+            None
         }
-    } else {
-        true
+        None => Some(
+            "auth-required: this relay serves only the authenticated author's events".to_owned(),
+        ),
     }
 }
 
@@ -1477,7 +1520,7 @@ async fn nostr_server(
                             }
                         }
                     },
-                    Ok(NostrMessage::SubMsg(s)) if s.count => {
+                    Ok(NostrMessage::SubMsg(mut s)) if s.count => {
                         // NIP-45 COUNT: one-shot, never registered for live
                         // matching, so max_subs accounting is untouched. Any
                         // refusal answers CLOSED, per the NIP.
@@ -1486,7 +1529,9 @@ async fn nostr_server(
                         if let Some(ref lim) = sub_lim_opt {
                             lim.until_ready_with_jitter(jitter).await;
                         }
-                        let refusal = if let Some(msg) = s.filters.iter().find_map(|f| f.extension_error.clone()) {
+                        let refusal = if let Some(reason) = restrict_reads(&mut s, &conn, &settings) {
+                            Some(reason)
+                        } else if let Some(msg) = s.filters.iter().find_map(|f| f.extension_error.clone()) {
                             Some(format!("invalid: {msg}"))
                         } else if settings.limits.limit_scrapers && s.is_scraper() {
                             Some("blocked: count too broad".to_string())
@@ -1516,8 +1561,19 @@ async fn nostr_server(
                             }
                         }
                     },
-                    Ok(NostrMessage::SubMsg(s)) => {
+                    Ok(NostrMessage::SubMsg(mut s)) => {
                         debug!("subscription requested (cid: {}, sub: {:?})", cid, s.id);
+                        // author-only reads: narrow before the duplicate
+                        // check, so it compares like with like.
+                        if let Some(reason) = restrict_reads(&mut s, &conn, &settings) {
+                            info!("subscription refused: {} (cid: {}, sub: {:?})", reason, cid, s.id);
+                            if ws_stream.send(Message::Text(json!(["CLOSED", s.id, reason]).to_string())).await.is_err() {
+                                debug!("failed to send message, closing connection (cid: {})", cid);
+                                metrics.disconnects.with_label_values(&["send_error"]).inc();
+                                break;
+                            }
+                            continue
+                        }
                         // subscription handling consists of:
                         // * check for rate limits
                         // * registering the subscription so future events can be matched

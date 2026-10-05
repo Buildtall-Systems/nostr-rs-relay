@@ -190,6 +190,10 @@ limit_scrapers = false
 nip42_auth = true
 # Send DMs (kind 4 and 44) and gift wraps (kind 1059) only to their authenticated recipients
 #nip42_dms = false
+# Serve each client only the events it authored. Requests and counts
+# from a client that has not authenticated are closed with
+# "auth-required". Requires nip42_auth and info.relay_url.
+#author_only_reads = false
 
 [verified_users]
 # NIP-05 verification of users.  Can be "enabled" to require NIP-05

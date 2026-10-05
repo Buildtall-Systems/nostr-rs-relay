@@ -332,6 +332,15 @@ impl Subscription {
         false
     }
 
+    /// Narrow every filter so it can match only events authored by
+    /// `author` (hex). Used by author-only reads, where an
+    /// authenticated client may read nothing but its own events.
+    pub fn restrict_to_author(&mut self, author: &str) {
+        for f in &mut self.filters {
+            f.restrict_to_author(author);
+        }
+    }
+
     /// Is this subscription defined as a scraper query
     pub fn is_scraper(&self) -> bool {
         for f in &self.filters {
@@ -371,6 +380,18 @@ fn prefix_match(prefixes: &[String], target: &str) -> bool {
 }
 
 impl ReqFilter {
+    /// Replace the authors with `author` alone. A filter that named
+    /// authors without `author` asked only for other authors' events,
+    /// so it matches nothing.
+    pub fn restrict_to_author(&mut self, author: &str) {
+        if let Some(prefixes) = &self.authors {
+            if !prefix_match(prefixes, author) {
+                self.force_no_match = true;
+            }
+        }
+        self.authors = Some(vec![author.to_owned()]);
+    }
+
     fn ids_match(&self, event: &Event) -> bool {
         self.ids
             .as_ref()
@@ -917,6 +938,49 @@ mod tests {
             r#"["REQ","xyz",{"kinds":[1],"since":1000,"order":"published_at"}]"#,
         )?;
         assert!(!s_order_since.interested_in_event(&e));
+        Ok(())
+    }
+
+    #[test]
+    fn restrict_to_author_fills_absent_authors() -> Result<()> {
+        let mut s: Subscription = serde_json::from_str(r#"["REQ","xyz",{"kinds":[1]}]"#)?;
+        s.restrict_to_author("abc");
+        let f = s.filters.first().unwrap();
+        assert_eq!(f.authors, Some(vec!["abc".to_owned()]));
+        assert!(!f.force_no_match);
+        Ok(())
+    }
+
+    #[test]
+    fn restrict_to_author_keeps_only_the_author() -> Result<()> {
+        let mut s: Subscription =
+            serde_json::from_str(r#"["REQ","xyz",{"authors":["abc","bcd"]}]"#)?;
+        s.restrict_to_author("abc");
+        let f = s.filters.first().unwrap();
+        assert_eq!(f.authors, Some(vec!["abc".to_owned()]));
+        assert!(!f.force_no_match);
+        Ok(())
+    }
+
+    #[test]
+    fn restrict_to_author_without_the_author_matches_nothing() -> Result<()> {
+        let mut s: Subscription =
+            serde_json::from_str(r#"["REQ","xyz",{"authors":["bcd"]},{"kinds":[1]}]"#)?;
+        s.restrict_to_author("abc");
+        let e = Event {
+            pubkey: "abc".to_owned(),
+            kind: 1,
+            ..Event::simple_event()
+        };
+        assert!(s.filters[0].force_no_match);
+        assert!(!s.filters[1].force_no_match);
+        assert!(!s.filters[0].interested_in_event(&e));
+        assert!(s.filters[1].interested_in_event(&e));
+        let other = Event {
+            pubkey: "bcd".to_owned(),
+            ..e
+        };
+        assert!(!s.interested_in_event(&other));
         Ok(())
     }
 

@@ -16,6 +16,9 @@ pub struct Limitation {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     restricted_writes: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_required: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -84,6 +87,7 @@ impl From<Settings> for RelayInfo {
                     || c.authorization.pubkey_whitelist.is_some()
                     || c.grpc.restricts_write,
             ),
+            auth_required: c.authorization.author_only_reads.then_some(true),
         };
 
         let (payment_url, fees) = if p.enabled {

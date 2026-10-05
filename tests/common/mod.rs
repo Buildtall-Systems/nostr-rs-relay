@@ -19,6 +19,12 @@ pub struct Relay {
 }
 
 pub fn start_relay() -> Result<Relay> {
+    start_relay_with(|_| {})
+}
+
+/// Start a relay like [`start_relay`], applying `adjust` to the
+/// settings after the test defaults are in place.
+pub fn start_relay_with(adjust: impl FnOnce(&mut config::Settings)) -> Result<Relay> {
     // setup tracing
     let _trace_sub = tracing_subscriber::fmt::try_init();
     info!("Starting a new relay");
@@ -35,6 +41,7 @@ pub fn start_relay() -> Result<Relay> {
     settings.database.in_memory = true;
     settings.database.min_conn = 4;
     settings.database.max_conn = 8;
+    adjust(&mut settings);
     let (shutdown_tx, shutdown_rx): (MpscSender<()>, MpscReceiver<()>) = syncmpsc::channel();
     let handle = thread::spawn(move || {
         // server will block the thread it is run on.

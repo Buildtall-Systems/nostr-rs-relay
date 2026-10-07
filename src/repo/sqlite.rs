@@ -1343,14 +1343,22 @@ pub fn build_pool(
             thread::sleep(Duration::from_millis(500));
         }
     }
+    let mmap_size = settings.database.mmap_size;
+    let init = move |c: &mut rusqlite::Connection| {
+        c.execute_batch(STARTUP_SQL)?;
+        if let Some(size) = mmap_size {
+            c.pragma_update(None, "mmap_size", size)?;
+        }
+        Ok(())
+    };
     let manager = if settings.database.in_memory {
         SqliteConnectionManager::file("file::memory:?cache=shared")
             .with_flags(flags)
-            .with_init(|c| c.execute_batch(STARTUP_SQL))
+            .with_init(init)
     } else {
         SqliteConnectionManager::file(&full_path)
             .with_flags(flags)
-            .with_init(|c| c.execute_batch(STARTUP_SQL))
+            .with_init(init)
     };
     let pool: SqlitePool = r2d2::Pool::builder()
         .test_on_check_out(true) // no noticeable performance hit
@@ -1366,8 +1374,11 @@ pub fn build_pool(
     }
 
     info!(
-        "Built a connection pool {:?} (min={}, max={})",
-        name, min_size, max_size
+        "Built a connection pool {:?} (min={}, max={}, mmap_size={})",
+        name,
+        min_size,
+        max_size,
+        mmap_size.unwrap_or(0)
     );
     pool
 }
@@ -1969,5 +1980,48 @@ mod tests {
         assert_eq!(order_idx, None);
         let (_query, _params, ids_idx) = query_from_filter(&with_ids);
         assert_eq!(ids_idx, Some("event_hash_index".to_owned()));
+    }
+
+    /// Build a file-backed pool in a fresh directory and report the
+    /// mmap_size a pooled connection runs with.
+    fn pooled_mmap_size(name: &str, mmap_size: Option<u64>) -> i64 {
+        let dir =
+            std::env::temp_dir().join(format!("nostr-rs-relay-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut settings = Settings::default();
+        settings.database.data_directory = dir.to_str().unwrap().to_owned();
+        settings.database.mmap_size = mmap_size;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE;
+        let pool = build_pool(name, &settings, flags, 1, 1, false);
+        let size = pool
+            .get()
+            .unwrap()
+            .query_row("PRAGMA mmap_size", [], |r| r.get(0))
+            .unwrap();
+        drop(pool);
+        std::fs::remove_dir_all(&dir).unwrap();
+        size
+    }
+
+    #[test]
+    fn pool_mmap_size_unset_is_disabled() {
+        assert!(Settings::default().database.mmap_size.is_none());
+        assert_eq!(pooled_mmap_size("mmap-unset", None), 0);
+    }
+
+    #[test]
+    fn pool_mmap_size_applies_setting() {
+        assert_eq!(
+            pooled_mmap_size("mmap-set", Some(2_147_418_112)),
+            2_147_418_112
+        );
+    }
+
+    #[test]
+    fn pool_mmap_size_clamps_to_sqlite_maximum() {
+        assert_eq!(
+            pooled_mmap_size("mmap-clamp", Some(4_294_967_296)),
+            2_147_418_112
+        );
     }
 }

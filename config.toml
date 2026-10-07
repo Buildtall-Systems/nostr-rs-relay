@@ -54,6 +54,15 @@ description = "A newly created nostr-rs-relay.\n\nCustomize this with your own i
 # to approx the number of cores.
 #max_conn = 8
 
+# Bytes of the SQLite file that each connection memory-maps for reads.
+# Mapped pages are read from the shared OS page cache instead of being
+# copied into each connection's private page cache.  SQLite caps the
+# value at 2147418112 on Linux; set that to map a database of any size
+# up to 2 GiB.  Defaults to 0, which disables memory-mapped I/O.
+# Caution; a disk read error on a mapped page terminates the relay
+# process, where an unmapped read would return an error.
+#mmap_size = 0
+
 # Database connection string.  Required for postgres; not used for
 # sqlite.
 #connection = "postgresql://postgres:nostr@localhost:7500/nostr"

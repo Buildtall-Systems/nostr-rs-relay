@@ -27,6 +27,7 @@ pub struct Database {
     pub max_conn: u32,
     pub connection: String,
     pub connection_write: Option<String>,
+    pub mmap_size: Option<u64>, // bytes of the SQLite file each connection memory-maps for reads (unset: 0, disabled)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +252,15 @@ impl Settings {
             settings.database.min_conn,
             settings.database.max_conn
         );
+        // SQLite reads the mmap_size pragma as a signed 64-bit integer
+        if let Some(mmap_size) = settings.database.mmap_size {
+            assert!(
+                i64::try_from(mmap_size).is_ok(),
+                "Database mmap_size setting ({}) cannot exceed {}",
+                mmap_size,
+                i64::MAX
+            );
+        }
         // ensure durations parse
         assert!(
             settings.verified_users.is_valid(),
@@ -309,6 +319,7 @@ impl Default for Settings {
                 max_conn: 8,
                 connection: "".to_owned(),
                 connection_write: None,
+                mmap_size: None,
             },
             grpc: Grpc {
                 event_admission_server: None,

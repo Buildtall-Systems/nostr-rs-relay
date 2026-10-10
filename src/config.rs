@@ -60,6 +60,7 @@ pub struct Network {
 #[allow(unused)]
 pub struct Options {
     pub reject_future_seconds: Option<usize>, // if defined, reject any events with a timestamp more than X seconds in the future
+    pub history_kinds: Vec<u64>, // replaceable and addressable kinds whose superseded versions the SQLite store keeps
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +386,7 @@ impl Default for Settings {
             },
             options: Options {
                 reject_future_seconds: None, // Reject events in the future if defined
+                history_kinds: vec![],       // Replace superseded versions of every kind
             },
             logging: Logging {
                 folder_path: None,

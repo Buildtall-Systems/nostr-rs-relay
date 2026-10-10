@@ -125,6 +125,18 @@ port = 7777
 # from the current time, but the default is to allow any date.
 reject_future_seconds = 1800
 
+# Replaceable and addressable kinds whose superseded versions the
+# store keeps.  For a listed kind, a new version does not delete the
+# older ones, and an older version published after a newer one is
+# still stored.  A query returns every retained version, so a reader
+# picks the newest per author, kind, and d tag itself.  A kind 5
+# deletion by e tag hides the one version it names.  A kind 5 deletion
+# by a tag (address) does not remove retained versions.  This changes
+# the NIP-01 replacement rules for the listed kinds.  Only the sqlite
+# engine reads this setting; postgres ignores it.  Defaults to empty,
+# which replaces superseded versions of every kind.
+#history_kinds = [30818]
+
 [limits]
 # Limit events created per second, averaged over one minute.  Must be
 # an integer.  If not set (or set to 0), there is no limit.  Note:

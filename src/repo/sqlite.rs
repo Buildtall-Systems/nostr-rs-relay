@@ -51,6 +51,8 @@ pub struct SqliteRepo {
     write_in_progress: Arc<Mutex<u64>>,
     /// Semaphore for readers to acquire blocking threads
     reader_threads_ready: Arc<Semaphore>,
+    /// Replaceable and addressable kinds whose superseded versions are kept
+    history_kinds: Arc<Vec<u64>>,
 }
 
 impl SqliteRepo {
@@ -99,11 +101,20 @@ impl SqliteRepo {
             checkpoint_in_progress,
             write_in_progress,
             reader_threads_ready,
+            history_kinds: Arc::new(settings.options.history_kinds.clone()),
         }
     }
 
     /// Persist an event to the database, returning rows added.
-    pub fn persist_event(conn: &mut PooledConnection, e: &Event) -> Result<u64> {
+    ///
+    /// A replaceable or addressable event whose kind is in
+    /// `history_kinds` is stored even when a newer version exists, and
+    /// storing it removes no older version.
+    pub fn persist_event(
+        conn: &mut PooledConnection,
+        e: &Event,
+        history_kinds: &[u64],
+    ) -> Result<u64> {
         // enable auto vacuum
         conn.execute_batch("pragma auto_vacuum = FULL")?;
 
@@ -115,8 +126,10 @@ impl SqliteRepo {
         let delegator_blob: Option<Vec<u8>> =
             e.delegated_by.as_ref().and_then(|d| hex::decode(d).ok());
         let event_str = serde_json::to_string(&e).ok();
+        // a history kind keeps every version, so no version replaces another.
+        let replaces = !history_kinds.contains(&e.kind);
         // check for replaceable events that would hide this one; we won't even attempt to insert these.
-        if e.is_replaceable() {
+        if replaces && e.is_replaceable() {
             let repl_count = tx.query_row(
                 "SELECT e.id FROM event e INDEXED BY author_index WHERE e.author=? AND e.kind=? AND e.created_at >= ? LIMIT 1;",
                 params![pubkey_blob, e.kind, e.created_at], |row| row.get::<usize, usize>(0));
@@ -125,7 +138,7 @@ impl SqliteRepo {
             }
         }
         // check for parameterized replaceable events that would be hidden; don't insert these either.
-        if let Some(d_tag) = e.distinct_param() {
+        if let Some(d_tag) = e.distinct_param().filter(|_| replaces) {
             let repl_count = tx.query_row(
                 "SELECT e.id FROM event e LEFT JOIN tag t ON e.id=t.event_id WHERE e.author=? AND e.kind=? AND t.name='d' AND t.value=? AND e.created_at >= ? LIMIT 1;",
                 params![pubkey_blob, e.kind, d_tag, e.created_at],|row| row.get::<usize, usize>(0));
@@ -168,7 +181,7 @@ impl SqliteRepo {
         // if this event is replaceable update, remove other replaceable
         // event with the same kind from the same author that was issued
         // earlier than this.
-        if e.is_replaceable() {
+        if replaces && e.is_replaceable() {
             let author = hex::decode(&e.pubkey).ok();
             // this is a backwards check - hide any events that were older.
             let update_count = tx.execute(
@@ -185,7 +198,7 @@ impl SqliteRepo {
             }
         }
         // if this event is parameterized replaceable, remove other events.
-        if let Some(d_tag) = e.distinct_param() {
+        if let Some(d_tag) = e.distinct_param().filter(|_| replaces) {
             let update_count = tx.execute(
                 "DELETE FROM event WHERE kind=? AND author=? AND id IN (SELECT e.id FROM event e LEFT JOIN tag t ON e.id=t.event_id WHERE e.kind=? AND e.author=? AND t.name='d' AND t.value=? ORDER BY t.created_at DESC LIMIT -1 OFFSET 1);",
                 params![e.kind, pubkey_blob, e.kind, pubkey_blob, d_tag])?;
@@ -279,6 +292,7 @@ impl NostrRepo for SqliteRepo {
         // spawn a blocking thread
         //let mut conn = self.write_pool.get()?;
         let pool = self.write_pool.clone();
+        let history_kinds = self.history_kinds.clone();
         let e = e.clone();
         let event_count = task::spawn_blocking(move || {
             let mut conn = pool.get()?;
@@ -286,7 +300,7 @@ impl NostrRepo for SqliteRepo {
             // multiple times before giving up.
             loop {
                 attempts += 1;
-                let wr = SqliteRepo::persist_event(&mut conn, &e);
+                let wr = SqliteRepo::persist_event(&mut conn, &e, &history_kinds);
                 match wr {
                     Err(SqlError(rusqlite::Error::SqliteFailure(e, _))) => {
                         // this basically means that NIP-05 or another

@@ -60,6 +60,7 @@ pub struct Network {
 #[allow(unused)]
 pub struct Options {
     pub reject_future_seconds: Option<usize>, // if defined, reject any events with a timestamp more than X seconds in the future
+    #[serde(default)] // the config crate drops an empty list from the defaults
     pub history_kinds: Vec<u64>, // replaceable and addressable kinds whose superseded versions the SQLite store keeps
 }
 

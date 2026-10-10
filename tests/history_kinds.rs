@@ -108,8 +108,21 @@ fn ids(versions: &[&(String, String)]) -> HashSet<String> {
     versions.iter().map(|(id, _)| id.clone()).collect()
 }
 
-async fn connect(history_kinds: Vec<u64>) -> Result<(common::Relay, Ws)> {
-    let relay = common::start_relay_with(|s| s.options.history_kinds = history_kinds)?;
+/// Start a relay on its own SQLite file. Every in-memory relay in one test
+/// process opens the same shared-cache database, so the tests here, which
+/// run in parallel and both write, would contend for one set of table locks.
+async fn connect(history_kinds: Vec<u64>, name: &str) -> Result<(common::Relay, Ws)> {
+    let dir = std::env::temp_dir().join(format!("history-kinds-{}-{}", name, std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let data_directory = dir
+        .to_str()
+        .ok_or_else(|| anyhow!("temp path is not UTF-8"))?
+        .to_owned();
+    let relay = common::start_relay_with(|s| {
+        s.options.history_kinds = history_kinds;
+        s.database.in_memory = false;
+        s.database.data_directory = data_directory;
+    })?;
     common::wait_for_healthy_relay(&relay).await?;
     let (ws, _res) = connect_async(format!("ws://localhost:{}", relay.port)).await?;
     Ok((relay, ws))
@@ -117,7 +130,7 @@ async fn connect(history_kinds: Vec<u64>) -> Result<(common::Relay, Ws)> {
 
 #[tokio::test]
 async fn history_kind_keeps_every_version() -> Result<()> {
-    let (relay, mut ws) = connect(vec![WIKI]).await?;
+    let (relay, mut ws) = connect(vec![WIKI], "kept").await?;
 
     let v1 = version(WIKI, "kept", 1000, "first")?;
     let v2 = version(WIKI, "kept", 2000, "second")?;
@@ -148,7 +161,7 @@ async fn history_kind_keeps_every_version() -> Result<()> {
 
 #[tokio::test]
 async fn without_the_setting_only_the_newest_version_stays() -> Result<()> {
-    let (relay, mut ws) = connect(vec![]).await?;
+    let (relay, mut ws) = connect(vec![], "replaced").await?;
 
     let v1 = version(WIKI, "replaced", 1000, "first")?;
     let v2 = version(WIKI, "replaced", 2000, "second")?;
@@ -168,4 +181,23 @@ fn history_kinds_defaults_to_empty() {
         .options
         .history_kinds
         .is_empty());
+}
+
+/// A config file that never names history_kinds still loads. The config
+/// crate drops an empty list from the defaults, so the field needs its own.
+#[test]
+fn config_file_without_history_kinds_loads() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "history-kinds-absent-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "[options]\nreject_future_seconds = 1800\n")?;
+    let loaded = nostr_rs_relay::config::Settings::new(&Some(
+        path.to_str().ok_or_else(|| anyhow!("temp path is not UTF-8"))?.to_owned(),
+    ));
+    std::fs::remove_file(&path)?;
+    let settings = loaded?;
+    assert!(settings.options.history_kinds.is_empty());
+    assert_eq!(settings.options.reject_future_seconds, Some(1800));
+    Ok(())
 }
